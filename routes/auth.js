@@ -3,8 +3,14 @@ const { createClient } = require('@supabase/supabase-js');
 
 const router = express.Router();
 
-// Initialize Supabase client with service role key
+// Initialize Supabase client with anon key for auth operations
 const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
+// Initialize admin client for data operations
+const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
   {
@@ -55,11 +61,11 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Create user in Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+    // ✅ Use Admin API to create user with auto-confirmation
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
-      email_confirm: true, // Auto-confirm email for development
+      email_confirm: true,  // 👈 Auto-confirm email
       user_metadata: {
         full_name: fullName || null
       }
@@ -67,40 +73,45 @@ router.post('/register', async (req, res) => {
 
     if (authError) {
       console.error('Auth error:', authError);
+      
+      if (authError.message.includes('already registered') || 
+          authError.message.includes('already exists')) {
+        return res.status(400).json({
+          error: 'User already exists',
+          message: 'An account with this email already exists'
+        });
+      }
+      
       return res.status(400).json({
         error: 'Registration failed',
         message: authError.message
       });
     }
 
-    // Create user profile in public.users table
-    const { data: userData, error: userError } = await supabase
-      .from('users')
-      .insert({
-        auth_id: authData.user.id,
-        email: authData.user.email,
-        full_name: fullName || null
-      })
-      .select()
-      .single();
-
-    if (userError) {
-      console.error('User profile error:', userError);
-      // If profile creation fails, we should ideally delete the auth user
-      // but for now, just log the error
+    if (!authData.user) {
       return res.status(500).json({
-        error: 'Profile creation failed',
-        message: 'User created but profile setup failed'
+        error: 'Registration failed',
+        message: 'User creation failed'
       });
     }
+
+    // Wait a moment for the trigger to complete
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Fetch the created profile
+    const { data: userData, error: userError } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('auth_id', authData.user.id)
+      .maybeSingle();
 
     res.status(201).json({
       message: 'User registered successfully',
       user: {
-        id: userData.id,
-        email: userData.email,
-        fullName: userData.full_name,
-        createdAt: userData.created_at
+        id: userData?.id || authData.user.id,
+        email: authData.user.email,
+        fullName: userData?.full_name || fullName,
+        createdAt: userData?.created_at || new Date().toISOString()
       }
     });
 
@@ -151,11 +162,11 @@ router.post('/login', async (req, res) => {
     }
 
     // Get user profile from public.users table
-    const { data: userData, error: userError } = await supabase
+    const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
       .select('*')
       .eq('auth_id', authData.user.id)
-      .single();
+      .maybeSingle();
 
     if (userError) {
       console.error('User profile fetch error:', userError);
@@ -204,7 +215,7 @@ router.post('/logout', async (req, res) => {
     const token = authHeader.substring(7);
 
     // Sign out from Supabase
-    const { error } = await supabase.auth.admin.signOut(token);
+    const { error } = await supabaseAdmin.auth.admin.signOut(token);
 
     if (error) {
       console.error('Logout error:', error);
@@ -255,11 +266,11 @@ router.get('/me', async (req, res) => {
     }
 
     // Get user profile from public.users table
-    const { data: userData, error: userError } = await supabase
+    const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
       .select('*')
       .eq('auth_id', user.id)
-      .single();
+      .maybeSingle();
 
     if (userError) {
       console.error('User profile fetch error:', userError);
@@ -323,6 +334,69 @@ router.post('/refresh', async (req, res) => {
     console.error('Refresh token error:', error);
     res.status(500).json({
       error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/auth/cleanup/:email
+ * DEVELOPMENT ONLY - Delete user from both auth and public tables
+ */
+router.delete('/cleanup/:email', async (req, res) => {
+  try {
+    // Only allow in development
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'This endpoint is only available in development'
+      });
+    }
+
+    const { email } = req.params;
+
+    if (!email || !validateEmail(email)) {
+      return res.status(400).json({
+        error: 'Invalid email',
+        message: 'Please provide a valid email address'
+      });
+    }
+
+    // Get user from public.users table
+    const { data: userData } = await supabaseAdmin
+      .from('users')
+      .select('auth_id')
+      .eq('email', email)
+      .maybeSingle();
+
+    // Delete from public.users table
+    await supabaseAdmin
+      .from('users')
+      .delete()
+      .eq('email', email);
+
+    // Delete from auth.users if we found the auth_id
+    if (userData?.auth_id) {
+      await supabaseAdmin.auth.admin.deleteUser(userData.auth_id);
+    } else {
+      // Try to find and delete from auth by email
+      const { data: { users } } = await supabaseAdmin.auth.admin.listUsers();
+      const authUser = users.find(u => u.email === email);
+      
+      if (authUser) {
+        await supabaseAdmin.auth.admin.deleteUser(authUser.id);
+      }
+    }
+
+    res.json({
+      message: 'User cleaned up successfully',
+      email
+    });
+
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({
+      error: 'Cleanup failed',
       message: error.message
     });
   }

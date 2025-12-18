@@ -9,7 +9,10 @@ const PORT = process.env.PORT || 3000;
 // CORS Configuration
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',') 
-  : ['http://localhost:8081', 'exp://localhost:8081'];
+  : ['http://localhost:8081', 
+      'exp://localhost:8081',
+      'http://192.168.0.11:8081', // Replace with your actual IP
+      'exp://192.168.0.11:8081'];
 
 app.use(cors({
   origin: function(origin, callback) {
