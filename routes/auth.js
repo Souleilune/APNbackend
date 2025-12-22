@@ -340,6 +340,173 @@ router.post('/refresh', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/change-password
+ * Change user password
+ */
+router.post('/change-password', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'No token provided'
+      });
+    }
+
+    const token = authHeader.substring(7);
+    const { oldPassword, newPassword } = req.body;
+
+    // Validation
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'Old password and new password are required'
+      });
+    }
+
+    if (!validatePassword(newPassword)) {
+      return res.status(400).json({
+        error: 'Invalid password',
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    // Verify token and get user
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+
+    if (authError || !user) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Invalid or expired token'
+      });
+    }
+
+    // Verify old password by attempting to sign in
+    const { error: verifyError } = await supabase.auth.signInWithPassword({
+      email: user.email,
+      password: oldPassword
+    });
+
+    if (verifyError) {
+      return res.status(400).json({
+        error: 'Invalid password',
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Update password using admin API
+    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+      user.id,
+      { password: newPassword }
+    );
+
+    if (updateError) {
+      console.error('Password update error:', updateError);
+      return res.status(500).json({
+        error: 'Password update failed',
+        message: updateError.message
+      });
+    }
+
+    res.json({
+      message: 'Password changed successfully'
+    });
+
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/auth/profile
+ * Update user profile (full name)
+ */
+router.put('/profile', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'No token provided'
+      });
+    }
+
+    const token = authHeader.substring(7);
+    const { fullName } = req.body;
+
+    // Validation
+    if (fullName === undefined) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'Full name is required'
+      });
+    }
+
+    // Verify token and get user
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+
+    if (authError || !user) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Invalid or expired token'
+      });
+    }
+
+    // Update user_metadata in auth.users
+    const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(
+      user.id,
+      { user_metadata: { full_name: fullName } }
+    );
+
+    if (authUpdateError) {
+      console.error('Auth metadata update error:', authUpdateError);
+    }
+
+    // Update full_name in public.users table
+    const { data: userData, error: userError } = await supabaseAdmin
+      .from('users')
+      .update({ 
+        full_name: fullName,
+        updated_at: new Date().toISOString()
+      })
+      .eq('auth_id', user.id)
+      .select()
+      .single();
+
+    if (userError) {
+      console.error('User profile update error:', userError);
+      return res.status(500).json({
+        error: 'Profile update failed',
+        message: userError.message
+      });
+    }
+
+    res.json({
+      message: 'Profile updated successfully',
+      user: {
+        id: userData.id,
+        email: user.email,
+        fullName: userData.full_name,
+        createdAt: userData.created_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/**
  * DELETE /api/auth/cleanup/:email
  * DEVELOPMENT ONLY - Delete user from both auth and public tables
  */
