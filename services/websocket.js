@@ -1,11 +1,14 @@
 const { WebSocketServer } = require('ws');
 const { createClient } = require('@supabase/supabase-js');
+const EventEmitter = require('events');
 
-class WebSocketService {
+class WebSocketService extends EventEmitter {
   constructor() {
+    super();
     this.wss = null;
     this.clients = new Map(); // Map of userId -> Set of WebSocket connections
     this.supabase = null;
+    this.supabaseAdmin = null;
   }
 
   /**
@@ -17,6 +20,18 @@ class WebSocketService {
     this.supabase = createClient(
       process.env.SUPABASE_URL,
       process.env.SUPABASE_ANON_KEY
+    );
+
+    // Initialize Supabase Admin client for user lookups
+    this.supabaseAdmin = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
+        }
+      }
     );
 
     this.wss = new WebSocketServer({ 
@@ -64,8 +79,24 @@ class WebSocketService {
         return;
       }
 
-      const userId = user.id;
+      const authId = user.id;
+
+      // Get the actual user_id from the users table (not auth_id)
+      const { data: userData, error: userError } = await this.supabaseAdmin
+        .from('users')
+        .select('id')
+        .eq('auth_id', authId)
+        .maybeSingle();
+
+      if (userError || !userData) {
+        console.error('❌ WebSocket: Could not find user in database:', userError?.message || 'User not found');
+        ws.close(4004, 'User profile not found');
+        return;
+      }
+
+      const userId = userData.id; // Use the database user_id
       ws.userId = userId;
+      ws.authId = authId; // Store auth_id separately for reference
       ws.isAlive = true;
 
       // Add client to the map
@@ -137,8 +168,20 @@ class WebSocketService {
           }
           break;
 
+        case 'command':
         default:
-          console.log(`📩 WebSocket: Unknown message type from user ${ws.userId}:`, message.type);
+          // Handle device commands (legacy format or new format)
+          if (message.deviceId && message.command) {
+            console.log(`📨 WebSocket: Command received from user ${ws.userId}: ${message.command} for device ${message.deviceId}`);
+            this.emit('device_command', {
+              userId: ws.userId,
+              deviceId: message.deviceId,
+              command: message.command,
+              timestamp: message.timestamp || new Date().toISOString(),
+            });
+          } else {
+            console.log(`📩 WebSocket: Unknown message type from user ${ws.userId}:`, message.type || 'unknown');
+          }
       }
     } catch (error) {
       console.error('❌ WebSocket: Error parsing client message:', error.message);
@@ -246,6 +289,36 @@ class WebSocketService {
         ws.ping();
       });
     }, intervalMs);
+  }
+
+  /**
+   * Send error message to a specific user
+   * @param {string} userId - The user ID
+   * @param {string} code - Error code
+   * @param {string} message - Error message
+   * @param {object} details - Additional error details
+   */
+  sendErrorToUser(userId, code, message, details = {}) {
+    const userConnections = this.clients.get(userId);
+    if (!userConnections || userConnections.size === 0) {
+      console.log(`📭 WebSocket: No active connections for user ${userId} to send error`);
+      return false;
+    }
+
+    const errorMessage = JSON.stringify({
+      type: 'error',
+      code,
+      message,
+      details,
+      timestamp: new Date().toISOString(),
+    });
+
+    userConnections.forEach((ws) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(errorMessage);
+      }
+    });
+    return true;
   }
 
   /**
