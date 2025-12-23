@@ -1,0 +1,205 @@
+const mqtt = require('mqtt');
+const EventEmitter = require('events');
+
+class MQTTService extends EventEmitter {
+  constructor() {
+    super();
+    this.client = null;
+    this.isConnected = false;
+    this.topicPrefix = process.env.MQTT_TOPIC_PREFIX || 'apn/device';
+  }
+
+  /**
+   * Connect to the HiveMQ Cloud broker
+   */
+  connect() {
+    const brokerUrl = process.env.MQTT_BROKER_URL;
+    const port = process.env.MQTT_PORT || 8883;
+    const username = process.env.MQTT_USERNAME;
+    const password = process.env.MQTT_PASSWORD;
+
+    if (!brokerUrl || !username || !password) {
+      console.error('❌ MQTT: Missing required environment variables (MQTT_BROKER_URL, MQTT_USERNAME, MQTT_PASSWORD)');
+      return;
+    }
+
+    const connectUrl = `mqtts://${brokerUrl}:${port}`;
+
+    console.log(`📡 MQTT: Connecting to ${brokerUrl}:${port}...`);
+
+    this.client = mqtt.connect(connectUrl, {
+      username,
+      password,
+      protocol: 'mqtts',
+      rejectUnauthorized: true,
+      reconnectPeriod: 5000,
+      connectTimeout: 30000,
+      keepalive: 60,
+      clean: true,
+      clientId: `apn-backend-${Date.now()}`,
+    });
+
+    this._setupEventHandlers();
+  }
+
+  /**
+   * Setup MQTT client event handlers
+   */
+  _setupEventHandlers() {
+    this.client.on('connect', () => {
+      this.isConnected = true;
+      console.log('✅ MQTT: Connected to HiveMQ Cloud');
+      this._subscribeToTopics();
+    });
+
+    this.client.on('reconnect', () => {
+      console.log('🔄 MQTT: Reconnecting...');
+    });
+
+    this.client.on('disconnect', () => {
+      this.isConnected = false;
+      console.log('⚠️ MQTT: Disconnected');
+    });
+
+    this.client.on('error', (error) => {
+      console.error('❌ MQTT Error:', error.message);
+      this.emit('error', error);
+    });
+
+    this.client.on('offline', () => {
+      this.isConnected = false;
+      console.log('📴 MQTT: Client offline');
+    });
+
+    this.client.on('message', (topic, message) => {
+      this._handleMessage(topic, message);
+    });
+  }
+
+  /**
+   * Subscribe to telemetry topics
+   * Uses wildcard + to match any device_id
+   */
+  _subscribeToTopics() {
+    const telemetryTopic = `${this.topicPrefix}/+/telemetry`;
+    
+    this.client.subscribe(telemetryTopic, { qos: 1 }, (err, granted) => {
+      if (err) {
+        console.error('❌ MQTT: Subscription error:', err.message);
+        return;
+      }
+      console.log(`📬 MQTT: Subscribed to ${telemetryTopic}`);
+      granted.forEach((g) => {
+        console.log(`   - Topic: ${g.topic}, QoS: ${g.qos}`);
+      });
+    });
+  }
+
+  /**
+   * Handle incoming MQTT messages
+   * @param {string} topic - The MQTT topic
+   * @param {Buffer} message - The message payload
+   */
+  _handleMessage(topic, message) {
+    try {
+      // Extract device_id from topic (e.g., apn/device/DEVICE123/telemetry)
+      const topicParts = topic.split('/');
+      const deviceId = topicParts[2]; // Index 2 is the device_id
+      
+      // Parse JSON payload
+      const payload = JSON.parse(message.toString());
+      
+      // Determine message type based on payload structure
+      const messageType = this._determineMessageType(payload);
+      
+      console.log(`📨 MQTT: Received ${messageType} from device ${deviceId}`);
+      console.log('   Payload:', JSON.stringify(payload, null, 2));
+
+      // Emit typed event with parsed data
+      this.emit('telemetry', {
+        deviceId,
+        topic,
+        messageType,
+        payload,
+        receivedAt: new Date().toISOString(),
+      });
+
+    } catch (error) {
+      console.error('❌ MQTT: Error parsing message:', error.message);
+      console.error('   Raw message:', message.toString());
+    }
+  }
+
+  /**
+   * Determine the type of message based on payload structure
+   * @param {object} payload - The parsed payload
+   * @returns {string} - The message type
+   */
+  _determineMessageType(payload) {
+    if (payload.alert) {
+      return 'alert';
+    }
+    if (payload.status === 'ALERT_CLEARED') {
+      return 'alert_cleared';
+    }
+    if (payload.power) {
+      return 'power_status';
+    }
+    if (payload.water || payload.gas !== undefined || payload.temperature || payload.gyro) {
+      return 'sensor_reading';
+    }
+    // Legacy medication payload support
+    if (payload.medicine_name || payload.schedule_id) {
+      return 'medication';
+    }
+    return 'unknown';
+  }
+
+  /**
+   * Publish a message to a topic
+   * @param {string} topic - The topic to publish to
+   * @param {object} message - The message payload
+   */
+  publish(topic, message) {
+    if (!this.isConnected) {
+      console.error('❌ MQTT: Cannot publish - not connected');
+      return false;
+    }
+
+    const payload = JSON.stringify(message);
+    this.client.publish(topic, payload, { qos: 1 }, (err) => {
+      if (err) {
+        console.error('❌ MQTT: Publish error:', err.message);
+        return;
+      }
+      console.log(`📤 MQTT: Published to ${topic}`);
+    });
+    return true;
+  }
+
+  /**
+   * Disconnect from the broker
+   */
+  disconnect() {
+    if (this.client) {
+      this.client.end(true, () => {
+        console.log('👋 MQTT: Disconnected gracefully');
+      });
+    }
+  }
+
+  /**
+   * Check if connected
+   */
+  getConnectionStatus() {
+    return {
+      connected: this.isConnected,
+      clientId: this.client?.options?.clientId,
+    };
+  }
+}
+
+// Export singleton instance
+const mqttService = new MQTTService();
+module.exports = mqttService;
+
