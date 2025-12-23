@@ -435,7 +435,15 @@ router.get('/sensors', authenticateToken, async (req, res) => {
       readings: readings.map(r => ({
         id: r.id,
         deviceId: r.device_id,
-        water: [r.water_1, r.water_2, r.water_3, r.water_4],
+        // Convert stored 0/1 values to zone-based booleans
+        // Zone 1: water_1 (or water_2, they're the same), Zone 2: water_3 (or water_4, they're the same)
+        // Return as array for compatibility: [zone1, zone1, zone2, zone2]
+        water: [
+          r.water_1 === 1 ? 1 : 0, // Zone 1 detection
+          r.water_1 === 1 ? 1 : 0, // Zone 1 detection (duplicate for array format)
+          r.water_3 === 1 ? 1 : 0, // Zone 2 detection
+          r.water_3 === 1 ? 1 : 0  // Zone 2 detection (duplicate for array format)
+        ],
         gas: r.gas_detected,
         temperature: {
           temp1: r.temp_1,
@@ -497,7 +505,15 @@ router.get('/sensors/latest', authenticateToken, async (req, res) => {
       reading: {
         id: reading.id,
         deviceId: reading.device_id,
-        water: [reading.water_1, reading.water_2, reading.water_3, reading.water_4],
+        // Convert stored 0/1 values to zone-based booleans
+        // Zone 1: water_1 (or water_2, they're the same), Zone 2: water_3 (or water_4, they're the same)
+        // Return as array for compatibility: [zone1, zone1, zone2, zone2]
+        water: [
+          reading.water_1 === 1 ? 1 : 0, // Zone 1 detection
+          reading.water_1 === 1 ? 1 : 0, // Zone 1 detection (duplicate for array format)
+          reading.water_3 === 1 ? 1 : 0, // Zone 2 detection
+          reading.water_3 === 1 ? 1 : 0  // Zone 2 detection (duplicate for array format)
+        ],
         gas: reading.gas_detected,
         temperature: {
           temp1: reading.temp_1,

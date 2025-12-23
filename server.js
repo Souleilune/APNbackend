@@ -249,17 +249,44 @@ async function handleAlertCleared(deviceId, userId, payload, receivedAt) {
  */
 async function handleSensorReading(deviceId, userId, payload, receivedAt) {
   try {
+    // Extract movement from gyro object (gyro.movement) or use direct movement value
+    const movementValue = payload.gyro?.movement !== undefined 
+      ? payload.gyro.movement 
+      : (payload.movement || null);
+
+    // Extract temperature from temperature object (temperature.temp1/temp2) or use direct values
+    const temp1 = payload.temperature?.temp1 !== undefined 
+      ? payload.temperature.temp1 
+      : (payload.temp_1 !== undefined ? payload.temp_1 : null);
+    const temp2 = payload.temperature?.temp2 !== undefined 
+      ? payload.temperature.temp2 
+      : (payload.temp_2 !== undefined ? payload.temp_2 : null);
+
+    // Check water detection by zone (threshold: 500)
+    // Zone 1: sensors 1 & 2, Zone 2: sensors 3 & 4
+    const waterThreshold = 500;
+    const zone1Water1 = payload.water?.[0] || 0;
+    const zone1Water2 = payload.water?.[1] || 0;
+    const zone2Water3 = payload.water?.[2] || 0;
+    const zone2Water4 = payload.water?.[3] || 0;
+    
+    // Zone detection: if either sensor in zone exceeds threshold, zone has water
+    const zone1Detected = (zone1Water1 > waterThreshold) || (zone1Water2 > waterThreshold);
+    const zone2Detected = (zone2Water3 > waterThreshold) || (zone2Water4 > waterThreshold);
+    
+    // Store water detection as boolean (1 = detected, 0 = not detected)
+    // Use first sensor of each zone to store the detection status
     const sensorReading = {
       device_id: deviceId,
       user_id: userId,
-      water_1: payload.water?.[0] || null,
-      water_2: payload.water?.[1] || null,
-      water_3: payload.water?.[2] || null,
-      water_4: payload.water?.[3] || null,
+      water_1: zone1Detected ? 1 : 0,
+      water_2: zone1Detected ? 1 : 0, // Keep same value for zone consistency
+      water_3: zone2Detected ? 1 : 0,
+      water_4: zone2Detected ? 1 : 0, // Keep same value for zone consistency
       gas_detected: payload.gas !== undefined ? Boolean(payload.gas) : null,
-      temp_1: payload.temperature?.[0] || payload.temp_1 || null,
-      temp_2: payload.temperature?.[1] || payload.temp_2 || null,
-      movement: payload.gyro || payload.movement || null,
+      temp_1: temp1,
+      temp_2: temp2,
+      movement: movementValue,
       power_status: payload.power || null,
       received_at: receivedAt,
     };
@@ -274,6 +301,59 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
     }
 
     console.log(`✅ Sensor reading stored for device ${deviceId}`);
+    if (zone1Detected) {
+      console.log(`   💧 Zone 1: Water detected`);
+    }
+    if (zone2Detected) {
+      console.log(`   💧 Zone 2: Water detected`);
+    }
+
+    // Check for water alerts by zone
+    const zones = [
+      { zone: 1, detected: zone1Detected },
+      { zone: 2, detected: zone2Detected },
+    ];
+
+    for (const zoneInfo of zones) {
+      if (zoneInfo.detected) {
+        // Check if an active alert already exists for this zone
+        const { data: existingAlert, error: checkError } = await supabaseAdmin
+          .from('alerts')
+          .select('id')
+          .eq('device_id', deviceId)
+          .eq('user_id', userId)
+          .eq('alert_type', 'WATER_DETECTED')
+          .eq('sensor', `ZONE${zoneInfo.zone}`)
+          .eq('is_active', true)
+          .maybeSingle();
+
+        if (checkError) {
+          console.error(`❌ Error checking for existing water alert (ZONE${zoneInfo.zone}):`, checkError.message);
+          continue;
+        }
+
+        // Only create alert if one doesn't already exist
+        if (!existingAlert) {
+          const { error: alertError } = await supabaseAdmin
+            .from('alerts')
+            .insert({
+              device_id: deviceId,
+              user_id: userId,
+              alert_type: 'WATER_DETECTED',
+              sensor: `ZONE${zoneInfo.zone}`,
+              value: 1, // Boolean value: 1 = detected
+              is_active: true,
+              received_at: receivedAt,
+            });
+
+          if (alertError) {
+            console.error(`❌ Error storing water alert (ZONE${zoneInfo.zone}):`, alertError.message);
+          } else {
+            console.log(`✅ Water alert created: ZONE${zoneInfo.zone} for device ${deviceId}`);
+          }
+        }
+      }
+    }
   } catch (error) {
     console.error('❌ Error handling sensor reading:', error);
   }
