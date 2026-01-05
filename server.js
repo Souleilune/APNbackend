@@ -5,8 +5,10 @@ const http = require('http');
 const { createClient } = require('@supabase/supabase-js');
 const authRoutes = require('./routes/auth');
 const telemetryRoutes = require('./routes/telemetry');
+const notificationRoutes = require('./routes/notifications');
 const mqttService = require('./services/mqtt');
 const websocketService = require('./services/websocket');
+const pushNotificationService = require('./services/push-notifications');
 
 const app = express();
 const server = http.createServer(app);
@@ -68,6 +70,7 @@ app.get('/', (req, res) => {
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/telemetry', telemetryRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // 404 Handler
 app.use((req, res) => {
@@ -173,6 +176,14 @@ async function handleAlert(deviceId, userId, payload, receivedAt) {
     }
 
     console.log(`✅ Alert stored: ${alertType} for device ${deviceId}`);
+
+    // Send push notification to user
+    try {
+      await pushNotificationService.sendPushNotificationToUser(userId, alert);
+    } catch (pushError) {
+      console.error('❌ Error sending push notification:', pushError);
+      // Don't fail the alert creation if push notification fails
+    }
 
     // If it's a gas leak detected alert, also create a sensor reading entry
     if (alertType === 'GAS_LEAK_DETECTED') {
@@ -334,7 +345,7 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
 
         // Only create alert if one doesn't already exist
         if (!existingAlert) {
-          const { error: alertError } = await supabaseAdmin
+          const { data: waterAlert, error: alertError } = await supabaseAdmin
             .from('alerts')
             .insert({
               device_id: deviceId,
@@ -344,12 +355,21 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
               value: 1, // Boolean value: 1 = detected
               is_active: true,
               received_at: receivedAt,
-            });
+            })
+            .select()
+            .single();
 
           if (alertError) {
             console.error(`❌ Error storing water alert (ZONE${zoneInfo.zone}):`, alertError.message);
           } else {
             console.log(`✅ Water alert created: ZONE${zoneInfo.zone} for device ${deviceId}`);
+            
+            // Send push notification for water alert
+            try {
+              await pushNotificationService.sendPushNotificationToUser(userId, waterAlert);
+            } catch (pushError) {
+              console.error('❌ Error sending push notification for water alert:', pushError);
+            }
           }
         }
       }
