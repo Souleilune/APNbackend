@@ -105,6 +105,9 @@ async function handleTelemetry(data) {
 
     if (deviceError || !device) {
       console.error(`❌ MQTT: Device ${deviceId} not found in database`);
+      console.error(`   💡 To fix this, pair the device using: POST /api/telemetry/device/pair`);
+      console.error(`   📋 Device ID: ${deviceId}`);
+      console.error(`   ⚠️  Data from this device will be ignored until it is paired.`);
       return;
     }
 
