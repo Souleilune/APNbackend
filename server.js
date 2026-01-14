@@ -421,6 +421,14 @@ async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
 
 // Initialize MQTT Service
 mqttService.on('telemetry', handleTelemetry);
+
+// Handle MQTT errors gracefully to prevent server crashes
+mqttService.on('error', (error) => {
+  // Log the error but don't crash the server
+  console.error('⚠️ MQTT Service Error (handled):', error.message);
+  // The MQTT client will automatically attempt to reconnect
+});
+
 mqttService.connect();
 
 // Initialize WebSocket Service
@@ -496,6 +504,28 @@ Telemetry Routes: http://localhost:${PORT}/api/telemetry
 WebSocket: ws://localhost:${PORT}/ws/telemetry
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   `);
+});
+
+// Handle unhandled errors to prevent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit - log and continue
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('⚠️ Uncaught Exception:', error);
+  // For MQTT keepalive errors, don't crash
+  if (error.message && error.message.includes('Keepalive timeout')) {
+    console.log('🔄 MQTT Keepalive timeout caught - server will continue');
+    return;
+  }
+  // For other critical errors, exit gracefully
+  console.error('❌ Critical error - shutting down gracefully');
+  mqttService.disconnect();
+  websocketService.close();
+  server.close(() => {
+    process.exit(1);
+  });
 });
 
 // Graceful Shutdown

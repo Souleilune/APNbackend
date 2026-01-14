@@ -37,6 +37,13 @@ class MQTTService extends EventEmitter {
       keepalive: 60,
       clean: true,
       clientId: `apn-backend-${Date.now()}`,
+      // Additional options for better connection stability
+      will: {
+        topic: `${this.topicPrefix}/backend/status`,
+        payload: JSON.stringify({ status: 'offline' }),
+        qos: 1,
+        retain: false,
+      },
     });
 
     this._setupEventHandlers();
@@ -54,6 +61,7 @@ class MQTTService extends EventEmitter {
 
     this.client.on('reconnect', () => {
       console.log('🔄 MQTT: Reconnecting...');
+      this.isConnected = false;
     });
 
     this.client.on('disconnect', () => {
@@ -63,12 +71,39 @@ class MQTTService extends EventEmitter {
 
     this.client.on('error', (error) => {
       console.error('❌ MQTT Error:', error.message);
-      this.emit('error', error);
+      
+      // Handle keepalive timeout gracefully - don't crash the server
+      if (error.message && error.message.includes('Keepalive timeout')) {
+        console.log('🔄 MQTT: Keepalive timeout detected - connection will be re-established');
+        this.isConnected = false;
+        // Don't emit error for keepalive timeouts - let the client reconnect automatically
+        // The reconnectPeriod: 5000 in connect() will handle automatic reconnection
+        return;
+      }
+      
+      // For other errors, emit but don't crash
+      // Only emit if there are listeners to prevent unhandled error events
+      if (this.listenerCount('error') > 0) {
+        this.emit('error', error);
+      } else {
+        // If no listeners, just log the error
+        console.error('❌ MQTT Error (no listeners):', error);
+      }
     });
 
     this.client.on('offline', () => {
       this.isConnected = false;
       console.log('📴 MQTT: Client offline');
+    });
+
+    this.client.on('close', () => {
+      this.isConnected = false;
+      console.log('🔌 MQTT: Connection closed');
+    });
+
+    this.client.on('end', () => {
+      this.isConnected = false;
+      console.log('🔚 MQTT: Connection ended');
     });
 
     this.client.on('message', (topic, message) => {

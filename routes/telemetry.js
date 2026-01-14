@@ -82,6 +82,8 @@ router.post('/device/pair', authenticateToken, async (req, res) => {
       });
     }
 
+    console.log(`🔗 Pairing request: deviceId=${deviceId}, userId=${req.user.id}, name=${name || 'not provided'}`);
+
     // Check if device is already paired
     const { data: existingDevice, error: checkError } = await supabaseAdmin
       .from('devices')
@@ -89,15 +91,59 @@ router.post('/device/pair', authenticateToken, async (req, res) => {
       .eq('device_id', deviceId)
       .maybeSingle();
 
+    console.log(`🔍 Device lookup result: ${existingDevice ? `Found (userId: ${existingDevice.user_id})` : 'Not found'}`);
+
     if (checkError && checkError.code !== 'PGRST116') {
       throw checkError;
     }
 
     if (existingDevice) {
       if (existingDevice.user_id === req.user.id) {
-        return res.status(400).json({
-          error: 'Already paired',
-          message: 'This device is already paired to your account'
+        // Device already paired to this user - update it if needed and return success
+        const updateData = {};
+        if (name && name !== existingDevice.name) {
+          updateData.name = name;
+        }
+        // Ensure device is active
+        if (!existingDevice.is_active) {
+          updateData.is_active = true;
+        }
+
+        // Update device if needed
+        if (Object.keys(updateData).length > 0) {
+          const { data: updatedDevice, error: updateError } = await supabaseAdmin
+            .from('devices')
+            .update(updateData)
+            .eq('id', existingDevice.id)
+            .select()
+            .single();
+
+          if (updateError) {
+            throw updateError;
+          }
+
+          return res.status(200).json({
+            message: 'Device already paired - updated successfully',
+            device: {
+              id: updatedDevice.id,
+              deviceId: updatedDevice.device_id,
+              name: updatedDevice.name,
+              pairedAt: updatedDevice.paired_at,
+              isActive: updatedDevice.is_active
+            }
+          });
+        }
+
+        // Device exists and is already correctly configured
+        return res.status(200).json({
+          message: 'Device already paired to your account',
+          device: {
+            id: existingDevice.id,
+            deviceId: existingDevice.device_id,
+            name: existingDevice.name,
+            pairedAt: existingDevice.paired_at,
+            isActive: existingDevice.is_active
+          }
         });
       }
       return res.status(400).json({
