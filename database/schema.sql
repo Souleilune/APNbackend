@@ -106,6 +106,36 @@ CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type);
 CREATE INDEX IF NOT EXISTS idx_alerts_received_at ON alerts(received_at DESC);
 
 -- ============================================
+-- ARCHIVED_ALERTS TABLE
+-- Stores archived alerts that have been removed from the main alerts table
+-- ============================================
+CREATE TABLE IF NOT EXISTS archived_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_id VARCHAR(100) NOT NULL,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    
+    -- Alert information
+    alert_type VARCHAR(50) NOT NULL,
+    sensor VARCHAR(50),
+    value DECIMAL(10,2),
+    
+    -- Status
+    is_active BOOLEAN DEFAULT true,
+    cleared_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Metadata
+    received_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    archived_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_archived_alerts_device_id ON archived_alerts(device_id);
+CREATE INDEX IF NOT EXISTS idx_archived_alerts_user_id ON archived_alerts(user_id);
+CREATE INDEX IF NOT EXISTS idx_archived_alerts_archived_at ON archived_alerts(archived_at DESC);
+CREATE INDEX IF NOT EXISTS idx_archived_alerts_type ON archived_alerts(alert_type);
+CREATE INDEX IF NOT EXISTS idx_archived_alerts_received_at ON archived_alerts(received_at DESC);
+
+-- ============================================
 -- TELEMETRY_LOGS TABLE (Legacy - for medication data if needed)
 -- Stores telemetry data received from hardware devices
 -- ============================================
@@ -206,6 +236,25 @@ CREATE POLICY "Service role can insert alerts" ON alerts
 
 CREATE POLICY "Service role can update alerts" ON alerts
     FOR UPDATE
+    USING (true);
+
+-- Enable RLS on archived_alerts table
+ALTER TABLE archived_alerts ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can only see their own archived alerts
+CREATE POLICY "Users can view own archived alerts" ON archived_alerts
+    FOR SELECT
+    USING (auth.uid() IN (
+        SELECT auth_id FROM users WHERE id = archived_alerts.user_id
+    ));
+
+-- Policy: Service role can insert/delete archived alerts (for backend)
+CREATE POLICY "Service role can insert archived alerts" ON archived_alerts
+    FOR INSERT
+    WITH CHECK (true);
+
+CREATE POLICY "Service role can delete archived alerts" ON archived_alerts
+    FOR DELETE
     USING (true);
 
 -- Enable RLS on telemetry_logs table

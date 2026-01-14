@@ -689,5 +689,89 @@ router.post('/alerts/:alertId/acknowledge', authenticateToken, async (req, res) 
   }
 });
 
+/**
+ * POST /api/telemetry/alerts/:alertId/archive
+ * Archive an alert by moving it to archived_alerts table
+ */
+router.post('/alerts/:alertId/archive', authenticateToken, async (req, res) => {
+  try {
+    const { alertId } = req.params;
+
+    // First, get the alert to verify ownership and get all data
+    const { data: alert, error: fetchError } = await supabaseAdmin
+      .from('alerts')
+      .select('*')
+      .eq('id', alertId)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (fetchError) {
+      if (fetchError.code === 'PGRST116') {
+        return res.status(404).json({
+          error: 'Not found',
+          message: 'Alert not found or not owned by you'
+        });
+      }
+      throw fetchError;
+    }
+
+    // Insert into archived_alerts table
+    const { data: archivedAlert, error: archiveError } = await supabaseAdmin
+      .from('archived_alerts')
+      .insert({
+        id: alert.id,
+        device_id: alert.device_id,
+        user_id: alert.user_id,
+        alert_type: alert.alert_type,
+        sensor: alert.sensor,
+        value: alert.value,
+        is_active: alert.is_active,
+        cleared_at: alert.cleared_at,
+        received_at: alert.received_at,
+        archived_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (archiveError) {
+      console.error('Error archiving alert:', archiveError);
+      throw archiveError;
+    }
+
+    // Delete from alerts table
+    const { error: deleteError } = await supabaseAdmin
+      .from('alerts')
+      .delete()
+      .eq('id', alertId)
+      .eq('user_id', req.user.id);
+
+    if (deleteError) {
+      console.error('Error deleting alert after archiving:', deleteError);
+      // Try to clean up the archived alert if deletion fails
+      await supabaseAdmin
+        .from('archived_alerts')
+        .delete()
+        .eq('id', alertId);
+      throw deleteError;
+    }
+
+    res.json({
+      message: 'Alert archived successfully',
+      alert: {
+        id: archivedAlert.id,
+        alertType: archivedAlert.alert_type,
+        archivedAt: archivedAlert.archived_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Archive alert error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
 module.exports = router;
 

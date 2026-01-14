@@ -24,6 +24,7 @@
     "expo-server-sdk": "^3.7.0",
     "express": "^5.2.1",
     "mqtt": "^5.14.1",
+    "node-cron": "^3.0.3",
     "react-native-url-polyfill": "^3.0.0",
     "ws": "^8.18.3"
   },

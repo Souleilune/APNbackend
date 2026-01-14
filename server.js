@@ -9,6 +9,7 @@ const notificationRoutes = require('./routes/notifications');
 const mqttService = require('./services/mqtt');
 const websocketService = require('./services/websocket');
 const pushNotificationService = require('./services/push-notifications');
+const cleanupService = require('./services/cleanup');
 
 const app = express();
 const server = http.createServer(app);
@@ -425,6 +426,9 @@ mqttService.connect();
 // Initialize WebSocket Service
 websocketService.initialize(server);
 websocketService.startHeartbeat(30000);
+
+// Initialize Cleanup Service (cron job for archived alerts)
+cleanupService.initializeCleanupJob();
 
 // Setup MQTT command handling for WebSocket
 websocketService.on('device_command', async (data) => {
