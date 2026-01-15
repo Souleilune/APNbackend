@@ -388,6 +388,20 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
  */
 async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
   try {
+    // Extract movement from gyro object if present in payload
+    const movementValue = payload.gyro?.movement !== undefined 
+      ? payload.gyro.movement 
+      : null;
+    
+    // Stringify power object for storage (database stores as VARCHAR/TEXT)
+    const powerStatusString = payload.power 
+      ? JSON.stringify(payload.power)
+      : (payload.status || null);
+    
+    console.log(`📊 Storing power status - Device: ${deviceId}`);
+    console.log(`   Movement: ${movementValue}`);
+    console.log(`   Power data: ${powerStatusString ? powerStatusString.substring(0, 100) : 'null'}`);
+    
     // Store power status as a sensor reading
     const sensorReading = {
       device_id: deviceId,
@@ -399,21 +413,23 @@ async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
       gas_detected: null,
       temp_1: null,
       temp_2: null,
-      movement: null,
-      power_status: payload.power || payload.status || null,
+      movement: movementValue,
+      power_status: powerStatusString,
       received_at: receivedAt,
     };
 
-    const { error } = await supabaseAdmin
+    const { error, data } = await supabaseAdmin
       .from('sensor_readings')
-      .insert(sensorReading);
+      .insert(sensorReading)
+      .select();
 
     if (error) {
       console.error('❌ Error storing power status:', error.message);
+      console.error('   Error details:', error);
       return;
     }
 
-    console.log(`✅ Power status stored for device ${deviceId}`);
+    console.log(`✅ Power status stored for device ${deviceId} - ID: ${data?.[0]?.id}`);
   } catch (error) {
     console.error('❌ Error handling power status:', error);
   }
