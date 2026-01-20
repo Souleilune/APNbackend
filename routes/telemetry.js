@@ -819,5 +819,312 @@ router.post('/alerts/:alertId/archive', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/telemetry/sockets/scan
+ * Scan for sensors in a socket
+ */
+router.post('/sockets/scan', authenticateToken, async (req, res) => {
+  try {
+    const { socketName } = req.body;
+
+    if (!socketName) {
+      return res.status(400).json({
+        error: 'Missing required field',
+        message: 'Socket name is required'
+      });
+    }
+
+    console.log(`🔍 Scanning for sensors in socket: ${socketName}, userId: ${req.user.id}`);
+
+    // Get all active devices for this user
+    const { data: devices, error: devicesError } = await supabaseAdmin
+      .from('devices')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('is_active', true);
+
+    if (devicesError) {
+      throw devicesError;
+    }
+
+    // Get latest sensor readings for each device to check if sensors are active
+    const sensors = [];
+    
+    for (const device of devices || []) {
+      const { data: latestReading, error: readingError } = await supabaseAdmin
+        .from('sensor_readings')
+        .select('*')
+        .eq('device_id', device.device_id)
+        .order('received_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (readingError && readingError.code !== 'PGRST116') {
+        console.error(`Error fetching reading for device ${device.device_id}:`, readingError);
+        continue;
+      }
+
+      // If we have a recent reading (within last 5 minutes), consider sensors active
+      if (latestReading) {
+        const readingTime = new Date(latestReading.received_at);
+        const now = new Date();
+        const minutesSinceReading = (now - readingTime) / (1000 * 60);
+
+        if (minutesSinceReading <= 5) {
+          sensors.push({
+            id: device.id,
+            deviceId: device.device_id,
+            name: device.name || `Device ${device.device_id.slice(-4)}`,
+            type: 'ESP32 Sensor Device',
+          });
+        }
+      }
+    }
+
+    res.json({
+      sensors: sensors,
+      count: sensors.length
+    });
+
+  } catch (error) {
+    console.error('Scan sensors error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/telemetry/sockets
+ * Get all sockets for the authenticated user
+ */
+router.get('/sockets', authenticateToken, async (req, res) => {
+  try {
+    const { data: sockets, error } = await supabaseAdmin
+      .from('sockets')
+      .select(`
+        *,
+        socket_devices (
+          device_id,
+          devices (
+            id,
+            device_id,
+            name
+          )
+        )
+      `)
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    // Process sockets and handle cases where socket_devices might be null
+    const processedSockets = sockets.map(socket => {
+      let devices = [];
+      if (socket.socket_devices && Array.isArray(socket.socket_devices)) {
+        devices = socket.socket_devices
+          .filter(sd => sd.devices)
+          .map(sd => ({
+            id: sd.devices.id,
+            deviceId: sd.devices.device_id,
+            name: sd.devices.name
+          }));
+      }
+
+      return {
+        id: socket.id,
+        name: socket.name,
+        location: socket.location,
+        createdAt: socket.created_at,
+        updatedAt: socket.updated_at,
+        devices
+      };
+    });
+
+    res.json({
+      sockets: processedSockets
+    });
+
+  } catch (error) {
+    console.error('Get sockets error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/telemetry/sockets
+ * Create a new socket
+ */
+router.post('/sockets', authenticateToken, async (req, res) => {
+  try {
+    const { socketName, location, sensorIds } = req.body;
+
+    if (!socketName) {
+      return res.status(400).json({
+        error: 'Missing required field',
+        message: 'Socket name is required'
+      });
+    }
+
+    console.log(`🔌 Creating socket: ${socketName}, location: ${location || 'not provided'}, userId: ${req.user.id}, sensorIds: ${sensorIds?.length || 0}`);
+
+    // Validation: Check if there are additional sensor readings available that aren't already associated with existing sockets
+    // Get all devices associated with existing sockets
+    const { data: existingSockets, error: socketsError } = await supabaseAdmin
+      .from('sockets')
+      .select(`
+        socket_devices (
+          device_id
+        )
+      `)
+      .eq('user_id', req.user.id);
+
+    if (socketsError) {
+      throw socketsError;
+    }
+
+    // Extract all device IDs already associated with sockets
+    const associatedDeviceIds = new Set();
+    existingSockets?.forEach(socket => {
+      socket.socket_devices?.forEach(sd => {
+        if (sd.device_id) {
+          associatedDeviceIds.add(sd.device_id);
+        }
+      });
+    });
+
+    // Get all user's devices
+    const { data: userDevices, error: devicesError } = await supabaseAdmin
+      .from('devices')
+      .select('id, device_id')
+      .eq('user_id', req.user.id)
+      .eq('is_active', true);
+
+    if (devicesError) {
+      throw devicesError;
+    }
+
+    // Check if there are devices with sensor readings not associated with any socket
+    const unassociatedDevices = userDevices?.filter(device => !associatedDeviceIds.has(device.id)) || [];
+    
+    // Check if any of these unassociated devices have recent sensor readings
+    let hasAdditionalSensorData = false;
+    for (const device of unassociatedDevices) {
+      const { data: latestReading, error: readingError } = await supabaseAdmin
+        .from('sensor_readings')
+        .select('*')
+        .eq('device_id', device.device_id)
+        .order('received_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (readingError && readingError.code !== 'PGRST116') {
+        console.error(`Error checking readings for device ${device.device_id}:`, readingError);
+        continue;
+      }
+
+      if (latestReading) {
+        const readingTime = new Date(latestReading.received_at);
+        const now = new Date();
+        const minutesSinceReading = (now - readingTime) / (1000 * 60);
+        
+        // If we have a recent reading (within last 5 minutes), we have additional sensor data
+        if (minutesSinceReading <= 5) {
+          hasAdditionalSensorData = true;
+          break;
+        }
+      }
+    }
+
+    // If no additional sensor data is available, return error
+    if (!hasAdditionalSensorData && unassociatedDevices.length === 0) {
+      return res.status(400).json({
+        error: 'Sensor validation failed',
+        message: 'sensors are not set correctly'
+      });
+    }
+    
+    // Verify that all sensorIds belong to the user's devices
+    if (sensorIds && sensorIds.length > 0) {
+      const { data: userDevicesForValidation, error: devicesValidationError } = await supabaseAdmin
+        .from('devices')
+        .select('id')
+        .eq('user_id', req.user.id)
+        .in('id', sensorIds);
+
+      if (devicesValidationError) {
+        throw devicesValidationError;
+      }
+
+      if (userDevicesForValidation.length !== sensorIds.length) {
+        return res.status(400).json({
+          error: 'Invalid sensors',
+          message: 'Some sensor IDs do not belong to your devices'
+        });
+      }
+    }
+
+    // Create socket record
+    const { data: socket, error: socketError } = await supabaseAdmin
+      .from('sockets')
+      .insert({
+        user_id: req.user.id,
+        name: socketName,
+        location: location || null,
+      })
+      .select()
+      .single();
+
+    if (socketError) {
+      throw socketError;
+    }
+
+    // Link devices to socket if sensorIds provided
+    if (sensorIds && sensorIds.length > 0) {
+      const socketDeviceInserts = sensorIds.map(deviceId => ({
+        socket_id: socket.id,
+        device_id: deviceId,
+      }));
+
+      const { error: linkError } = await supabaseAdmin
+        .from('socket_devices')
+        .insert(socketDeviceInserts);
+
+      if (linkError) {
+        // Rollback socket creation if linking fails
+        await supabaseAdmin
+          .from('sockets')
+          .delete()
+          .eq('id', socket.id);
+        throw linkError;
+      }
+    }
+    
+    res.status(201).json({
+      message: 'Socket created successfully',
+      socket: {
+        id: socket.id,
+        name: socket.name,
+        location: socket.location,
+        createdAt: socket.created_at,
+        sensorCount: sensorIds?.length || 0
+      }
+    });
+
+  } catch (error) {
+    console.error('Create socket error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
 module.exports = router;
 

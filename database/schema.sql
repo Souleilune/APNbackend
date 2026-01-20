@@ -33,6 +33,41 @@ CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_devices_active ON devices(device_id, is_active) WHERE is_active = true;
 
 -- ============================================
+-- SOCKETS TABLE
+-- Stores socket configurations for users
+-- ============================================
+CREATE TABLE IF NOT EXISTS sockets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    location VARCHAR(255),
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Junction table for sockets and devices (sensors)
+CREATE TABLE IF NOT EXISTS socket_devices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    socket_id UUID NOT NULL REFERENCES sockets(id) ON DELETE CASCADE,
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Ensure unique pairing
+    UNIQUE(socket_id, device_id)
+);
+
+-- Index for faster lookups by user_id
+CREATE INDEX IF NOT EXISTS idx_sockets_user_id ON sockets(user_id);
+
+-- Index for socket_devices lookups
+CREATE INDEX IF NOT EXISTS idx_socket_devices_socket_id ON socket_devices(socket_id);
+CREATE INDEX IF NOT EXISTS idx_socket_devices_device_id ON socket_devices(device_id);
+
+-- ============================================
 -- SENSOR_READINGS TABLE
 -- Stores periodic sensor data from ESP32
 -- ============================================
@@ -204,6 +239,64 @@ CREATE POLICY "Users can delete own devices" ON devices
         SELECT auth_id FROM users WHERE id = devices.user_id
     ));
 
+-- Enable RLS on sockets table
+ALTER TABLE sockets ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can view their own sockets
+CREATE POLICY "Users can view own sockets" ON sockets
+    FOR SELECT
+    USING (auth.uid() IN (
+        SELECT auth_id FROM users WHERE id = sockets.user_id
+    ));
+
+-- Policy: Users can insert their own sockets
+CREATE POLICY "Users can insert own sockets" ON sockets
+    FOR INSERT
+    WITH CHECK (auth.uid() IN (
+        SELECT auth_id FROM users WHERE id = sockets.user_id
+    ));
+
+-- Policy: Users can update their own sockets
+CREATE POLICY "Users can update own sockets" ON sockets
+    FOR UPDATE
+    USING (auth.uid() IN (
+        SELECT auth_id FROM users WHERE id = sockets.user_id
+    ));
+
+-- Policy: Users can delete their own sockets
+CREATE POLICY "Users can delete own sockets" ON sockets
+    FOR DELETE
+    USING (auth.uid() IN (
+        SELECT auth_id FROM users WHERE id = sockets.user_id
+    ));
+
+-- Enable RLS on socket_devices table
+ALTER TABLE socket_devices ENABLE ROW LEVEL SECURITY;
+
+-- Policy: Users can view socket_devices for their sockets
+CREATE POLICY "Users can view own socket devices" ON socket_devices
+    FOR SELECT
+    USING (auth.uid() IN (
+        SELECT auth_id FROM users 
+        WHERE id IN (SELECT user_id FROM sockets WHERE id = socket_devices.socket_id)
+    ));
+
+-- Policy: Users can insert socket_devices for their sockets
+CREATE POLICY "Users can insert own socket devices" ON socket_devices
+    FOR INSERT
+    WITH CHECK (auth.uid() IN (
+        SELECT auth_id FROM users 
+        WHERE id IN (SELECT user_id FROM sockets WHERE id = socket_devices.socket_id)
+    ));
+
+-- Policy: Users can delete socket_devices for their sockets
+CREATE POLICY "Users can delete own socket devices" ON socket_devices
+    FOR DELETE
+    USING (auth.uid() IN (
+        SELECT auth_id FROM users 
+        WHERE id IN (SELECT user_id FROM sockets WHERE id = socket_devices.socket_id)
+    ));
+
 -- Enable RLS on sensor_readings table
 ALTER TABLE sensor_readings ENABLE ROW LEVEL SECURITY;
 
@@ -289,5 +382,12 @@ $$ language 'plpgsql';
 DROP TRIGGER IF EXISTS update_devices_updated_at ON devices;
 CREATE TRIGGER update_devices_updated_at
     BEFORE UPDATE ON devices
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Trigger for sockets table
+DROP TRIGGER IF EXISTS update_sockets_updated_at ON sockets;
+CREATE TRIGGER update_sockets_updated_at
+    BEFORE UPDATE ON sockets
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();

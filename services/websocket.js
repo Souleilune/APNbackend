@@ -74,7 +74,11 @@ class WebSocketService extends EventEmitter {
       const { data: { user }, error } = await this.supabase.auth.getUser(token);
 
       if (error || !user) {
-        console.log('❌ WebSocket: Invalid or expired token');
+        // Only log once per connection attempt to avoid spam
+        if (!ws._authErrorLogged) {
+          console.log('❌ WebSocket: Invalid or expired token - connection rejected');
+          ws._authErrorLogged = true;
+        }
         ws.close(4002, 'Invalid token');
         return;
       }

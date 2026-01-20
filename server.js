@@ -388,20 +388,6 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
  */
 async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
   try {
-    // Extract movement from gyro object if present in payload
-    const movementValue = payload.gyro?.movement !== undefined 
-      ? payload.gyro.movement 
-      : null;
-    
-    // Stringify power object for storage (database stores as VARCHAR/TEXT)
-    const powerStatusString = payload.power 
-      ? JSON.stringify(payload.power)
-      : (payload.status || null);
-    
-    console.log(`📊 Storing power status - Device: ${deviceId}`);
-    console.log(`   Movement: ${movementValue}`);
-    console.log(`   Power data: ${powerStatusString ? powerStatusString.substring(0, 100) : 'null'}`);
-    
     // Store power status as a sensor reading
     const sensorReading = {
       device_id: deviceId,
@@ -413,23 +399,21 @@ async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
       gas_detected: null,
       temp_1: null,
       temp_2: null,
-      movement: movementValue,
-      power_status: powerStatusString,
+      movement: null,
+      power_status: payload.power || payload.status || null,
       received_at: receivedAt,
     };
 
-    const { error, data } = await supabaseAdmin
+    const { error } = await supabaseAdmin
       .from('sensor_readings')
-      .insert(sensorReading)
-      .select();
+      .insert(sensorReading);
 
     if (error) {
       console.error('❌ Error storing power status:', error.message);
-      console.error('   Error details:', error);
       return;
     }
 
-    console.log(`✅ Power status stored for device ${deviceId} - ID: ${data?.[0]?.id}`);
+    console.log(`✅ Power status stored for device ${deviceId}`);
   } catch (error) {
     console.error('❌ Error handling power status:', error);
   }
@@ -437,14 +421,6 @@ async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
 
 // Initialize MQTT Service
 mqttService.on('telemetry', handleTelemetry);
-
-// Handle MQTT errors gracefully to prevent server crashes
-mqttService.on('error', (error) => {
-  // Log the error but don't crash the server
-  console.error('⚠️ MQTT Service Error (handled):', error.message);
-  // The MQTT client will automatically attempt to reconnect
-});
-
 mqttService.connect();
 
 // Initialize WebSocket Service
@@ -520,28 +496,6 @@ Telemetry Routes: http://localhost:${PORT}/api/telemetry
 WebSocket: ws://localhost:${PORT}/ws/telemetry
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   `);
-});
-
-// Handle unhandled errors to prevent crashes
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit - log and continue
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('⚠️ Uncaught Exception:', error);
-  // For MQTT keepalive errors, don't crash
-  if (error.message && error.message.includes('Keepalive timeout')) {
-    console.log('🔄 MQTT Keepalive timeout caught - server will continue');
-    return;
-  }
-  // For other critical errors, exit gracefully
-  console.error('❌ Critical error - shutting down gracefully');
-  mqttService.disconnect();
-  websocketService.close();
-  server.close(() => {
-    process.exit(1);
-  });
 });
 
 // Graceful Shutdown
