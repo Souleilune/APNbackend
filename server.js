@@ -323,6 +323,70 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
       console.log(`   💧 Zone 2: Water detected`);
     }
 
+    // Auto-associate device with first two sockets for this user
+    try {
+      // Get the device UUID (id) from devices table
+      const { data: device, error: deviceLookupError } = await supabaseAdmin
+        .from('devices')
+        .select('id')
+        .eq('device_id', deviceId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (deviceLookupError) {
+        console.error(`❌ Error looking up device UUID:`, deviceLookupError.message);
+      } else if (device) {
+        const deviceUuid = device.id;
+
+        // Get the first two sockets for this user (ordered by creation date, oldest first)
+        const { data: sockets, error: socketsError } = await supabaseAdmin
+          .from('sockets')
+          .select('id')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: true })
+          .limit(2);
+
+        if (socketsError) {
+          console.error(`❌ Error fetching user sockets:`, socketsError.message);
+        } else if (sockets && sockets.length > 0) {
+          // For each of the first two sockets, ensure device association exists
+          for (const socket of sockets) {
+            // Check if association already exists
+            const { data: existingAssociation, error: checkError } = await supabaseAdmin
+              .from('socket_devices')
+              .select('id')
+              .eq('socket_id', socket.id)
+              .eq('device_id', deviceUuid)
+              .maybeSingle();
+
+            if (checkError && checkError.code !== 'PGRST116') {
+              console.error(`❌ Error checking socket-device association:`, checkError.message);
+              continue;
+            }
+
+            // Create association if it doesn't exist
+            if (!existingAssociation) {
+              const { error: insertError } = await supabaseAdmin
+                .from('socket_devices')
+                .insert({
+                  socket_id: socket.id,
+                  device_id: deviceUuid,
+                });
+
+              if (insertError) {
+                console.error(`❌ Error creating socket-device association:`, insertError.message);
+              } else {
+                console.log(`✅ Auto-associated device ${deviceId} with socket ${socket.id}`);
+              }
+            }
+          }
+        }
+      }
+    } catch (autoAssocError) {
+      // Don't fail the sensor reading if auto-association fails
+      console.error(`❌ Error in auto-association logic:`, autoAssocError.message);
+    }
+
     // Check for water alerts by zone
     const zones = [
       { zone: 1, detected: zone1Detected },

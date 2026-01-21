@@ -229,6 +229,88 @@ router.delete('/device/:deviceId', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/telemetry/devices/discover
+ * Discover unpaired ESP32 devices (no auth required for onboarding)
+ */
+router.post('/devices/discover', async (req, res) => {
+  try {
+    console.log('🔍 Device discovery request received');
+
+    // Get all devices that have recent sensor readings but are not paired
+    // Find devices with sensor_readings in the last 5 minutes
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+    // Get all sensor_readings from the last 5 minutes
+    const { data: recentReadings, error: readingsError } = await supabaseAdmin
+      .from('sensor_readings')
+      .select('device_id, received_at')
+      .gte('received_at', fiveMinutesAgo)
+      .order('received_at', { ascending: false });
+
+    if (readingsError) {
+      throw readingsError;
+    }
+
+    // Extract unique device IDs from recent readings
+    const activeDeviceIds = [...new Set(recentReadings?.map(r => r.device_id) || [])];
+
+    if (activeDeviceIds.length === 0) {
+      return res.json({
+        devices: [],
+        count: 0,
+        message: 'No active devices found'
+      });
+    }
+
+    // Check which of these devices are NOT paired (no user_id or user_id is null)
+    const { data: allDevices, error: devicesError } = await supabaseAdmin
+      .from('devices')
+      .select('*')
+      .in('device_id', activeDeviceIds);
+
+    if (devicesError) {
+      throw devicesError;
+    }
+
+    // Filter out paired devices and get unpaired device IDs
+    const pairedDeviceIds = new Set(
+      (allDevices || [])
+        .filter(d => d.user_id !== null)
+        .map(d => d.device_id)
+    );
+
+    const unpairedDeviceIds = activeDeviceIds.filter(id => !pairedDeviceIds.has(id));
+
+    // Get latest reading info for each unpaired device
+    const unpairedDevices = [];
+    for (const deviceId of unpairedDeviceIds) {
+      const deviceReadings = recentReadings?.filter(r => r.device_id === deviceId) || [];
+      const latestReading = deviceReadings[0]; // Already sorted by received_at DESC
+
+      unpairedDevices.push({
+        deviceId: deviceId,
+        lastSeen: latestReading?.received_at || new Date().toISOString(),
+        name: `ESP32-${deviceId.slice(-4)}`
+      });
+    }
+
+    console.log(`✅ Found ${unpairedDevices.length} unpaired active device(s)`);
+
+    res.json({
+      devices: unpairedDevices,
+      count: unpairedDevices.length
+    });
+
+  } catch (error) {
+    console.error('Device discovery error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+/**
  * GET /api/telemetry/devices
  * Get all devices paired to the authenticated user
  */
