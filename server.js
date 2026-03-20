@@ -119,7 +119,6 @@ async function handleTelemetry(data) {
 
     const userId = device.user_id;
 
-    // Route to appropriate handler based on message type
     switch (messageType) {
       case 'alert':
         await handleAlert(deviceId, userId, payload, receivedAt);

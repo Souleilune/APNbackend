@@ -13,42 +13,46 @@ class MQTTService extends EventEmitter {
    * Connect to the HiveMQ Cloud broker
    */
   connect() {
-    const brokerUrl = process.env.MQTT_BROKER_URL;
-    const port = process.env.MQTT_PORT || 8883;
-    const username = process.env.MQTT_USERNAME;
-    const password = process.env.MQTT_PASSWORD;
-
-    if (!brokerUrl || !username || !password) {
-      console.error('❌ MQTT: Missing required environment variables (MQTT_BROKER_URL, MQTT_USERNAME, MQTT_PASSWORD)');
-      return;
-    }
-
-    const connectUrl = `mqtts://${brokerUrl}:${port}`;
-
-    console.log(`📡 MQTT: Connecting to ${brokerUrl}:${port}...`);
-
-    this.client = mqtt.connect(connectUrl, {
-      username,
-      password,
-      protocol: 'mqtts',
-      rejectUnauthorized: true,
-      reconnectPeriod: 5000,
-      connectTimeout: 30000,
-      keepalive: 60,
-      clean: true,
-      clientId: `apn-backend-${Date.now()}`,
-      // Additional options for better connection stability
-      will: {
-        topic: `${this.topicPrefix}/backend/status`,
-        payload: JSON.stringify({ status: 'offline' }),
-        qos: 1,
-        retain: false,
-      },
-    });
-
-    this._setupEventHandlers();
+  const brokerUrl = process.env.MQTT_BROKER_URL;
+  const port = process.env.MQTT_PORT || 8883;
+  const username = process.env.MQTT_USERNAME;
+  const password = process.env.MQTT_PASSWORD;
+ 
+  if (!brokerUrl || !username || !password) {
+    console.error('❌ MQTT: Missing required environment variables (MQTT_BROKER_URL, MQTT_USERNAME, MQTT_PASSWORD)');
+    return;
   }
-
+ 
+  const connectUrl = `mqtts://${brokerUrl}:${port}`;
+ 
+  console.log(`📡 MQTT: Connecting to ${brokerUrl}:${port}...`);
+ 
+  this.client = mqtt.connect(connectUrl, {
+    username,
+    password,
+    protocol: 'mqtts',
+    rejectUnauthorized: true,
+    reconnectPeriod: 5000,
+    connectTimeout: 30000,
+    keepalive: 60,
+    clean: true,
+    clientId: `apn-backend-${Date.now()}`,
+    // Increase buffer size for larger messages
+    protocolVersion: 5, // Use MQTT 5.0 for better large message support
+    properties: {
+      maximumPacketSize: 268435455, // Maximum allowed (256MB)
+    },
+    // Additional options for better connection stability
+    will: {
+      topic: `${this.topicPrefix}/backend/status`,
+      payload: JSON.stringify({ status: 'offline' }),
+      qos: 1,
+      retain: false,
+    },
+  });
+ 
+  this._setupEventHandlers();
+}
   /**
    * Setup MQTT client event handlers
    */
@@ -135,35 +139,70 @@ class MQTTService extends EventEmitter {
    * @param {string} topic - The MQTT topic
    * @param {Buffer} message - The message payload
    */
-  _handleMessage(topic, message) {
-    try {
-      // Extract device_id from topic (e.g., apn/device/DEVICE123/telemetry)
-      const topicParts = topic.split('/');
-      const deviceId = topicParts[2]; // Index 2 is the device_id
+  __handleMessage(topic, message) {
+  try {
+    // Extract device_id from topic (e.g., apn/device/DEVICE123/telemetry)
+    const topicParts = topic.split('/');
+    const deviceId = topicParts[2]; // Index 2 is the device_id
+    
+    // Convert buffer to string
+    const messageStr = message.toString();
+    
+    // Check if message is complete JSON (should start with { and end with })
+    if (!messageStr.trim().startsWith('{') || !messageStr.trim().endsWith('}')) {
+      console.error('❌ MQTT: Incomplete JSON message received');
+      console.error('   Device:', deviceId);
+      console.error('   Message length:', messageStr.length);
+      console.error('   First 100 chars:', messageStr.substring(0, 100));
+      console.error('   Last 100 chars:', messageStr.substring(Math.max(0, messageStr.length - 100)));
       
-      // Parse JSON payload
-      const payload = JSON.parse(message.toString());
-      
-      // Determine message type based on payload structure
-      const messageType = this._determineMessageType(payload);
-      
-      console.log(`📨 MQTT: Received ${messageType} from device ${deviceId}`);
+      // Log to help debug on ESP32 side
+      console.error('   ⚠️  ESP32 may need to increase publish buffer or split messages');
+      return;
+    }
+    
+    // Parse JSON payload
+    const payload = JSON.parse(messageStr);
+    
+    // Determine message type based on payload structure
+    const messageType = this._determineMessageType(payload);
+    
+    console.log(`📨 MQTT: Received ${messageType} from device ${deviceId}`);
+    
+    // Only log full payload for alerts and important messages
+    if (messageType === 'alert' || messageType === 'alert_cleared') {
       console.log('   Payload:', JSON.stringify(payload, null, 2));
-
-      // Emit typed event with parsed data
-      this.emit('telemetry', {
-        deviceId,
-        topic,
-        messageType,
-        payload,
-        receivedAt: new Date().toISOString(),
-      });
-
-    } catch (error) {
-      console.error('❌ MQTT: Error parsing message:', error.message);
-      console.error('   Raw message:', message.toString());
+    } else {
+      console.log('   Type: sensor_reading, Device:', deviceId);
+    }
+ 
+    // Emit typed event with parsed data
+    this.emit('telemetry', {
+      deviceId,
+      topic,
+      messageType,
+      payload,
+      receivedAt: new Date().toISOString(),
+    });
+ 
+  } catch (error) {
+    console.error('❌ MQTT: Error parsing message:', error.message);
+    console.error('   Topic:', topic);
+    console.error('   Message length:', message.length);
+    console.error('   Raw message (first 500 chars):', message.toString().substring(0, 500));
+    
+    // Try to identify the issue
+    const messageStr = message.toString();
+    if (messageStr.length > 0) {
+      const lastChar = messageStr[messageStr.length - 1];
+      if (lastChar === ',') {
+        console.error('   💡 Message appears truncated (ends with comma)');
+        console.error('   💡 ESP32 needs larger buffer or message chunking');
+      }
     }
   }
+}
+ 
 
   /**
    * Determine the type of message based on payload structure

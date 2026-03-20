@@ -11,3 +11,6 @@ ADD COLUMN IF NOT EXISTS location VARCHAR(255);
 -- Add a comment to document the column
 COMMENT ON COLUMN public.sockets.location IS 'Optional location description for the socket';
 
+
+
+
