@@ -1,5 +1,5 @@
 #include <Wire.h>
-#include <MPU6050_tockn.h>
+  #include <MPU6050_tockn.h>
   #include <ESP32Servo.h>
   #include <WiFi.h>
   #include <WiFiClientSecure.h>
@@ -16,7 +16,6 @@
   const char* mqtt_username = "esp32_apn";
   const char* mqtt_password = "APN20250k";
   #define MQTT_MAX_PACKET_SIZE 2048
-
 const char* root_ca = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -82,7 +81,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   const int   ADC_MAX         = 4095;
   // Voltage sensor settings
   const float inputMaxVoltage   = 25.0f;
-  const float calibrationFactor = 0.65f;  // tune so V1 matches your multimeter
+  const float calibrationFactor  = 0.65f;  // V1 calibration — matches 12V line
+  const float calibrationFactor2 = 1.505f; // V2 calibration — corrects low reading on GPIO 35
   // ACS712-5A current sensor settings (with 68k + 100k divider)
   const float DIVIDER_RATIO = 0.08f;
   // const float SENSITIVITY   = 0.138f;
@@ -118,7 +118,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   float voltageThreshold  = 16.0f;
   float currentThreshold  = 2.0f;
   float tempThreshold     = 50.0f;   // 50°C trip point
-  float gyroThreshold     = 5.0f;
+  float gyroThreshold     = 8.0f;
   float tempWarningLevel  = 40.0f;
   float voltageWarning    = 14.5f;
   float currentWarning    = 1.5f;
@@ -129,8 +129,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   Servo breakerServo1;
   Servo breakerServo2;
   int gyroRestAngle   = 90;
-  int gyroShakeAngle1 = 45;
-  int gyroShakeAngle2 = 135;
+  int gyroShakeAngle1 = 90;
+  int gyroShakeAngle2 = 90;
   // Breaker 1: Normal (CW trip)
   int breaker1OnAngle  = 90;
   int breaker1OffAngle = 0;
@@ -304,7 +304,7 @@ void syncTime() {
       *rawOut = (int)rawAvg;
     }
     float voltage = (rawAvg / ADC_MAX) * inputMaxVoltage;
-    voltage *= calibrationFactor;
+    voltage *= (pin == VOLTAGE_SENSOR_2) ? calibrationFactor2 : calibrationFactor;
     if (voltage < 2.0f) {   // clamp <2V to 0
       voltage = 0.0f;
     }
@@ -908,41 +908,34 @@ bool mqttReconnect() {
     publishMessage(output.c_str());
   }
   // ==================== SEND SENSOR DATA ====================
-void sendSensorData(bool forceImmediate) {
+  void sendSensorData(bool forceImmediate) {
     if (!mqttClient.connected() || !systemEnabled) return;
     unsigned long now = millis();
     if (!forceImmediate && (now - lastDataSendTime < dataSendInterval)) return;
     jsonDoc.clear();
-    // ✅ Reduce precision to save bytes
     JsonArray waterArray = jsonDoc.createNestedArray("water");
     waterArray.add(isActiveLowFiltered(WATER1));
     waterArray.add(isActiveLowFiltered(WATER2));
     waterArray.add(isActiveLowFiltered(WATER3));
     waterArray.add(isActiveLowFiltered(WATER4));
-    jsonDoc["gas"] = checkGasDetected();
+    jsonDoc["gas"]     = checkGasDetected();
     jsonDoc["gas_raw"] = readGasSensor();
     JsonObject tempObj = jsonDoc.createNestedObject("temperature");
-    // ✅ Round to 1 decimal instead of full float
-    tempObj["temp1"] = round(readTemp(TEMP1) * 10) / 10.0;
-    tempObj["temp2"] = round(readTemp(TEMP2) * 10) / 10.0;
+    tempObj["temp1"] = readTemp(TEMP1);
+    tempObj["temp2"] = readTemp(TEMP2);
     JsonObject gyroObj = jsonDoc.createNestedObject("gyro");
     mpu.update();
-    // ✅ Round to 2 decimals
-    float movement = abs(mpu.getGyroX()) + abs(mpu.getGyroY()) + abs(mpu.getGyroZ());
-    gyroObj["movement"] = round(movement * 100) / 100.0;
-    // ✅ REMOVE individual x,y,z to save space (only send total movement)
-    // gyroObj["x"] = mpu.getGyroX();
-    // gyroObj["y"] = mpu.getGyroY();
-    // gyroObj["z"] = mpu.getGyroZ();
+    gyroObj["movement"] = abs(mpu.getGyroX()) + abs(mpu.getGyroY()) + abs(mpu.getGyroZ());
+    gyroObj["x"] = mpu.getGyroX();
+    gyroObj["y"] = mpu.getGyroY();
+    gyroObj["z"] = mpu.getGyroZ();
     JsonObject powerObj = jsonDoc.createNestedObject("power");
-    // ✅ Round to 2 decimals
-    powerObj["voltage1"] = round(voltage1_V * 100) / 100.0;
-    powerObj["voltage2"] = round(voltage2_V * 100) / 100.0;
-    powerObj["current1"] = round(current1_A * 100) / 100.0;
-    powerObj["current2"] = round(current2_A * 100) / 100.0;
-    // ✅ REMOVE raw values to save space (only needed for debugging)
-    // powerObj["v1_raw"] = voltage1_raw;
-    // powerObj["v2_raw"] = voltage2_raw;
+    powerObj["voltage1"] = voltage1_V;
+    powerObj["voltage2"] = voltage2_V;
+    powerObj["current1"] = current1_A;
+    powerObj["current2"] = current2_A;
+    powerObj["v1_raw"] = voltage1_raw;
+    powerObj["v2_raw"] = voltage2_raw;
     JsonObject breakerObj = jsonDoc.createNestedObject("breakers");
     breakerObj["breaker1"] = breaker1State;
     breakerObj["breaker2"] = breaker2State;
@@ -951,8 +944,6 @@ void sendSensorData(bool forceImmediate) {
     jsonDoc["uptime"] = millis() / 1000;
     String output;
     serializeJson(jsonDoc, output);
-    // ✅ ADD SIZE CHECK
-    Serial.printf("📊 Payload size: %d bytes\n", output.length());
     publishMessage(output.c_str());
     lastDataSendTime = now;
   }
