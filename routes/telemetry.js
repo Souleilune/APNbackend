@@ -1181,8 +1181,9 @@ router.post('/sockets', authenticateToken, async (req, res) => {
       }
     }
 
-    // If no additional sensor data is available, return error
-    if (!hasAdditionalSensorData && unassociatedDevices.length === 0) {
+    // If no additional sensor data is available and no sensorIds were provided, return error
+    // (if the client provided explicit sensorIds we should allow creating the socket)
+    if ((!sensorIds || sensorIds.length === 0) && !hasAdditionalSensorData && unassociatedDevices.length === 0) {
       return res.status(400).json({
         error: 'Sensor validation failed',
         message: 'sensors are not set correctly'
