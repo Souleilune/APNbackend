@@ -139,7 +139,7 @@ class MQTTService extends EventEmitter {
    * @param {string} topic - The MQTT topic
    * @param {Buffer} message - The message payload
    */
-  __handleMessage(topic, message) {
+  _handleMessage(topic, message) {
   try {
     // Extract device_id from topic (e.g., apn/device/DEVICE123/telemetry)
     const topicParts = topic.split('/');
