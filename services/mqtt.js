@@ -9,9 +9,7 @@ class MQTTService extends EventEmitter {
     this.topicPrefix = process.env.MQTT_TOPIC_PREFIX || 'apn/device';
   }
 
-  /**
-   * Connect to the HiveMQ Cloud broker
-   */
+ 
   connect() {
   const brokerUrl = process.env.MQTT_BROKER_URL;
   const port = process.env.MQTT_PORT || 8883;
@@ -37,12 +35,10 @@ class MQTTService extends EventEmitter {
     keepalive: 60,
     clean: true,
     clientId: `apn-backend-${Date.now()}`,
-    // Increase buffer size for larger messages
     protocolVersion: 5, // Use MQTT 5.0 for better large message support
     properties: {
       maximumPacketSize: 268435455, // Maximum allowed (256MB)
     },
-    // Additional options for better connection stability
     will: {
       topic: `${this.topicPrefix}/backend/status`,
       payload: JSON.stringify({ status: 'offline' }),
@@ -141,7 +137,6 @@ class MQTTService extends EventEmitter {
    */
   _handleMessage(topic, message) {
   try {
-    // Extract device_id from topic (e.g., apn/device/DEVICE123/telemetry)
     const topicParts = topic.split('/');
     const deviceId = topicParts[2]; // Index 2 is the device_id
     
