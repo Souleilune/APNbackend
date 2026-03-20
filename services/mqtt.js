@@ -7,6 +7,20 @@ class MQTTService extends EventEmitter {
     this.client = null;
     this.isConnected = false;
     this.topicPrefix = process.env.MQTT_TOPIC_PREFIX || 'apn/device';
+    // Buffers for reassembling truncated messages per device
+    this.fragmentBuffers = new Map(); // deviceId -> { data: string, ts: number }
+    this.fragmentTTL = parseInt(process.env.MQTT_FRAGMENT_TTL_MS || '30000', 10); // ms
+    this.fragmentMaxSize = parseInt(process.env.MQTT_FRAGMENT_MAX_SIZE || '20000', 10); // chars
+    // Periodic cleanup of stale fragments
+    setInterval(() => {
+      const now = Date.now();
+      for (const [deviceId, entry] of this.fragmentBuffers) {
+        if (now - entry.ts > this.fragmentTTL) {
+          this.fragmentBuffers.delete(deviceId);
+          console.log(`🧹 MQTT: Cleared stale fragment buffer for device ${deviceId}`);
+        }
+      }
+    }, Math.max(10000, this.fragmentTTL));
   }
 
  
@@ -142,22 +156,171 @@ class MQTTService extends EventEmitter {
     
     // Convert buffer to string
     const messageStr = message.toString();
-    
-    // Check if message is complete JSON (should start with { and end with })
-    if (!messageStr.trim().startsWith('{') || !messageStr.trim().endsWith('}')) {
-      console.error('❌ MQTT: Incomplete JSON message received');
-      console.error('   Device:', deviceId);
-      console.error('   Message length:', messageStr.length);
-      console.error('   First 100 chars:', messageStr.substring(0, 100));
-      console.error('   Last 100 chars:', messageStr.substring(Math.max(0, messageStr.length - 100)));
-      
-      // Log to help debug on ESP32 side
-      console.error('   ⚠️  ESP32 may need to increase publish buffer or split messages');
-      return;
+    const now = Date.now();
+
+    // Helper: attempt to parse a candidate string using the existing recovery heuristics
+    const tryParse = (str) => {
+      const t = str.trim();
+      if (t.startsWith('{') && t.endsWith('}')) {
+        return JSON.parse(str);
+      }
+
+      // 1) extract first {..} block if complete
+      const firstBrace = str.indexOf('{');
+      const lastBrace = str.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        const candidate = str.substring(firstBrace, lastBrace + 1);
+        try {
+          return JSON.parse(candidate);
+        } catch (err) {
+          // fallthrough to next attempt
+        }
+      }
+
+      // 2) try auto-closing unmatched braces and trimming trailing comma
+      if (firstBrace !== -1) {
+        let candidate = str.substring(firstBrace).replace(/,\s*$/, '');
+        let open = 0;
+        for (let i = 0; i < candidate.length; i++) {
+          const ch = candidate[i];
+          if (ch === '{') open++;
+          else if (ch === '}') open--;
+        }
+        if (open > 0) candidate = candidate + '}'.repeat(open);
+        return JSON.parse(candidate);
+      }
+
+      // couldn't parse
+      return null;
+    };
+
+    // Check existing fragment buffer for this device and try to reassemble
+    const existing = this.fragmentBuffers.get(deviceId);
+    let payload = null;
+
+    // If we have a previous fragment, attempt reassembly.
+    if (existing && existing.data) {
+      // If incoming fragment looks like the start of a new JSON (starts with '{'),
+      // don't blindly append it to an existing fragment (it would produce '...}{...').
+      if (!messageStr.trim().startsWith('{')) {
+        const combined = existing.data + messageStr;
+        try {
+          payload = tryParse(combined);
+          if (payload) {
+            console.log(`🔧 MQTT: Reassembled message for device ${deviceId} from buffer (${existing.data.length}+${messageStr.length} chars)`);
+            this.fragmentBuffers.delete(deviceId);
+          }
+        } catch (err) {
+          // ignore, fallback below
+        }
+      } else {
+        // Incoming fragment is a new JSON start. The previous fragment is likely
+        // an orphaned/truncated message — overwrite buffer with the new fragment
+        // so we can attempt reassembly from this new start.
+        this.fragmentBuffers.set(deviceId, { data: messageStr.slice(0, this.fragmentMaxSize), ts: now });
+        console.log(`🔁 MQTT: Overwriting fragment buffer for device ${deviceId} with new JSON start`);
+        // We'll attempt to parse the new fragment below.
+      }
     }
-    
-    // Parse JSON payload
-    const payload = JSON.parse(messageStr);
+
+    // If not parsed yet, try parsing the incoming message alone
+    if (!payload) {
+      try {
+        payload = tryParse(messageStr);
+        if (!payload) {
+          // message still incomplete - store/append to fragment buffer
+          const newData = (existing && existing.data ? existing.data + messageStr : messageStr).slice(0, this.fragmentMaxSize);
+          this.fragmentBuffers.set(deviceId, { data: newData, ts: now });
+          console.error('❌ MQTT: Incomplete JSON message received');
+          console.error('   Device:', deviceId);
+          console.error('   Message length:', messageStr.length);
+          console.error('   First 100 chars:', messageStr.substring(0, 100));
+          console.error('   Last 100 chars:', messageStr.substring(Math.max(0, messageStr.length - 100)));
+          console.error('   ⚠️  Stored fragment for reassembly (will expire if no more fragments)');
+          // Emit a partial telemetry event so frontend can show available fields without firmware changes
+          try {
+            const partial = extractPartialFields(messageStr);
+            this.emit('telemetry_partial', {
+              deviceId,
+              topic,
+              messageType: 'sensor_reading',
+              payload: partial,
+              receivedAt: new Date().toISOString(),
+            });
+            console.log('🔔 MQTT: Emitted telemetry_partial with extracted fields');
+          } catch (e) {
+            // ignore extraction errors
+          }
+          return;
+        }
+      } catch (err) {
+        console.error('❌ MQTT: Error parsing message fragment:', err.message);
+        // store fragment in case subsequent fragments arrive
+        const newData = (existing && existing.data ? existing.data + messageStr : messageStr).slice(0, this.fragmentMaxSize);
+        this.fragmentBuffers.set(deviceId, { data: newData, ts: now });
+        console.error('   ⚠️  Stored fragment for reassembly (parse error)');
+        // Emit partial fields if possible
+        try {
+          const partial = extractPartialFields(messageStr);
+          this.emit('telemetry_partial', {
+            deviceId,
+            topic,
+            messageType: 'sensor_reading',
+            payload: partial,
+            receivedAt: new Date().toISOString(),
+          });
+          console.log('🔔 MQTT: Emitted telemetry_partial after parse error');
+        } catch (e) {
+          // ignore
+        }
+        return;
+      }
+    }
+
+    // Helper to extract common fields from a truncated JSON string
+    function extractPartialFields(str) {
+      const out = {};
+      try {
+        // water: look for "water":[...]
+        const waterMatch = /"water"\s*:\s*\[(.*?)\]/.exec(str);
+        if (waterMatch) {
+          out.water = waterMatch[1].split(',').map(s => {
+            const t = s.trim();
+            if (t === 'true') return true;
+            if (t === 'false') return false;
+            const n = Number(t);
+            return Number.isNaN(n) ? t : n;
+          });
+        }
+
+        // gas: "gas":true/false
+        const gasMatch = /"gas"\s*:\s*(true|false)/.exec(str);
+        if (gasMatch) out.gas = gasMatch[1] === 'true';
+
+        // temperature values
+        const t1 = /"temp(?:1|_1)"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        const t2 = /"temp(?:2|_2)"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        if (t1 || t2) out.temperature = {};
+        if (t1) out.temperature.temp1 = Number(t1[1]);
+        if (t2) out.temperature.temp2 = Number(t2[1]);
+
+        // gyro movement
+        const mv = /"movement"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        if (mv) out.gyro = { movement: Number(mv[1]) };
+
+        // power raw v1_raw/v2_raw/current values
+        const v1 = /"v1_raw"\s*:\s*(\d+)/.exec(str);
+        if (v1) out.power = out.power || {}, out.power.v1_raw = Number(v1[1]);
+        const v2 = /"v2_raw"\s*:\s*(\d+)/.exec(str);
+        if (v2) out.power = out.power || {}, out.power.v2_raw = Number(v2[1]);
+        const cur1 = /"current1"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        if (cur1) out.power = out.power || {}, out.power.current1 = Number(cur1[1]);
+
+        return out;
+      } catch (err) {
+        return {};
+      }
+    }
     
     // Determine message type based on payload structure
     const messageType = this._determineMessageType(payload);

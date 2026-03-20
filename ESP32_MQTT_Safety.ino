@@ -1,5 +1,5 @@
 #include <Wire.h>
-  #include <MPU6050_tockn.h>
+#include <MPU6050_tockn.h>
   #include <ESP32Servo.h>
   #include <WiFi.h>
   #include <WiFiClientSecure.h>
@@ -15,6 +15,8 @@
   const int mqtt_port = 8883;  // ✅ FIX: was 8884, HiveMQ TLS port is 8883
   const char* mqtt_username = "esp32_apn";
   const char* mqtt_password = "APN20250k";
+  #define MQTT_MAX_PACKET_SIZE 2048
+
 const char* root_ca = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -906,34 +908,41 @@ bool mqttReconnect() {
     publishMessage(output.c_str());
   }
   // ==================== SEND SENSOR DATA ====================
-  void sendSensorData(bool forceImmediate) {
+void sendSensorData(bool forceImmediate) {
     if (!mqttClient.connected() || !systemEnabled) return;
     unsigned long now = millis();
     if (!forceImmediate && (now - lastDataSendTime < dataSendInterval)) return;
     jsonDoc.clear();
+    // ✅ Reduce precision to save bytes
     JsonArray waterArray = jsonDoc.createNestedArray("water");
     waterArray.add(isActiveLowFiltered(WATER1));
     waterArray.add(isActiveLowFiltered(WATER2));
     waterArray.add(isActiveLowFiltered(WATER3));
     waterArray.add(isActiveLowFiltered(WATER4));
-    jsonDoc["gas"]     = checkGasDetected();
+    jsonDoc["gas"] = checkGasDetected();
     jsonDoc["gas_raw"] = readGasSensor();
     JsonObject tempObj = jsonDoc.createNestedObject("temperature");
-    tempObj["temp1"] = readTemp(TEMP1);
-    tempObj["temp2"] = readTemp(TEMP2);
+    // ✅ Round to 1 decimal instead of full float
+    tempObj["temp1"] = round(readTemp(TEMP1) * 10) / 10.0;
+    tempObj["temp2"] = round(readTemp(TEMP2) * 10) / 10.0;
     JsonObject gyroObj = jsonDoc.createNestedObject("gyro");
     mpu.update();
-    gyroObj["movement"] = abs(mpu.getGyroX()) + abs(mpu.getGyroY()) + abs(mpu.getGyroZ());
-    gyroObj["x"] = mpu.getGyroX();
-    gyroObj["y"] = mpu.getGyroY();
-    gyroObj["z"] = mpu.getGyroZ();
+    // ✅ Round to 2 decimals
+    float movement = abs(mpu.getGyroX()) + abs(mpu.getGyroY()) + abs(mpu.getGyroZ());
+    gyroObj["movement"] = round(movement * 100) / 100.0;
+    // ✅ REMOVE individual x,y,z to save space (only send total movement)
+    // gyroObj["x"] = mpu.getGyroX();
+    // gyroObj["y"] = mpu.getGyroY();
+    // gyroObj["z"] = mpu.getGyroZ();
     JsonObject powerObj = jsonDoc.createNestedObject("power");
-    powerObj["voltage1"] = voltage1_V;
-    powerObj["voltage2"] = voltage2_V;
-    powerObj["current1"] = current1_A;
-    powerObj["current2"] = current2_A;
-    powerObj["v1_raw"] = voltage1_raw;
-    powerObj["v2_raw"] = voltage2_raw;
+    // ✅ Round to 2 decimals
+    powerObj["voltage1"] = round(voltage1_V * 100) / 100.0;
+    powerObj["voltage2"] = round(voltage2_V * 100) / 100.0;
+    powerObj["current1"] = round(current1_A * 100) / 100.0;
+    powerObj["current2"] = round(current2_A * 100) / 100.0;
+    // ✅ REMOVE raw values to save space (only needed for debugging)
+    // powerObj["v1_raw"] = voltage1_raw;
+    // powerObj["v2_raw"] = voltage2_raw;
     JsonObject breakerObj = jsonDoc.createNestedObject("breakers");
     breakerObj["breaker1"] = breaker1State;
     breakerObj["breaker2"] = breaker2State;
@@ -942,6 +951,8 @@ bool mqttReconnect() {
     jsonDoc["uptime"] = millis() / 1000;
     String output;
     serializeJson(jsonDoc, output);
+    // ✅ ADD SIZE CHECK
+    Serial.printf("📊 Payload size: %d bytes\n", output.length());
     publishMessage(output.c_str());
     lastDataSendTime = now;
   }
@@ -1214,6 +1225,8 @@ void setup() {
     syncTime();
     // espClient.setInsecure() removed from here — handled inside mqttReconnect()
     mqttClient.onMessage(onMqttMessage);  // ← must be INSIDE setup(), not global scope
+    mqttClient.setKeepAliveInterval(60 * 1000);
+    mqttClient.setConnectionTimeout(30 * 1000);
     mqttReconnect();
   } else {
     Serial.println("\n❌ WiFi FAILED - Check SSID/password");

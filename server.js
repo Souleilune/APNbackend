@@ -484,6 +484,43 @@ async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
 
 // Initialize MQTT Service
 mqttService.on('telemetry', handleTelemetry);
+// Handle partial telemetry emitted when messages are truncated
+mqttService.on('telemetry_partial', handlePartialTelemetry);
+
+/**
+ * Handle partial telemetry (don't store in DB, just forward to websocket)
+ */
+async function handlePartialTelemetry(data) {
+  const { deviceId, payload, receivedAt } = data;
+  try {
+    const { data: device, error: deviceError } = await supabaseAdmin
+      .from('devices')
+      .select('user_id, is_active')
+      .eq('device_id', deviceId)
+      .maybeSingle();
+
+    if (deviceError || !device) {
+      console.error(`❌ MQTT Partial: Device ${deviceId} not found in database`);
+      return;
+    }
+    if (!device.is_active) {
+      console.log(`⚠️ MQTT Partial: Device ${deviceId} is inactive, ignoring partial telemetry`);
+      return;
+    }
+
+    const userId = device.user_id;
+    // Forward partial telemetry to websocket clients with an 'incomplete' flag
+    websocketService.sendToUser(userId, {
+      deviceId,
+      messageType: 'sensor_reading',
+      payload: { ...payload, _incomplete: true },
+      receivedAt,
+    });
+    console.log(`📤 WebSocket: Forwarded partial telemetry for device ${deviceId} to user ${userId}`);
+  } catch (err) {
+    console.error('❌ MQTT Partial: Error handling partial telemetry:', err.message);
+  }
+}
 mqttService.connect();
 
 // Initialize WebSocket Service
