@@ -105,10 +105,67 @@ async function handleTelemetry(data) {
       .maybeSingle();
 
     if (deviceError || !device) {
-      console.error(`❌ MQTT: Device ${deviceId} not found in database`);
-      console.error(`   💡 To fix this, pair the device using: POST /api/telemetry/device/pair`);
-      console.error(`   📋 Device ID: ${deviceId}`);
-      console.error(`   ⚠️  Data from this device will be ignored until it is paired.`);
+      console.warn(`⚠️ MQTT: Device ${deviceId} not found in database`);
+      // If we received a sensor reading from an unregistered device, store a minimal
+      // sensor_readings row with user_id = null so that discovery can find active devices.
+      // We avoid triggering alerts, push notifications or socket associations for
+      // unpaired devices.
+      if (messageType === 'sensor_reading' || messageType === 'power_status') {
+        try {
+          // Build a minimal sensor reading object similar to handleSensorReading
+          const movementValue = payload.gyro?.movement !== undefined 
+            ? payload.gyro.movement 
+            : (payload.movement || null);
+
+          const temp1 = payload.temperature?.temp1 !== undefined 
+            ? payload.temperature.temp1 
+            : (payload.temp_1 !== undefined ? payload.temp_1 : null);
+          const temp2 = payload.temperature?.temp2 !== undefined 
+            ? payload.temperature.temp2 
+            : (payload.temp_2 !== undefined ? payload.temp_2 : null);
+
+          const waterThreshold = 500;
+          const zone1Water1 = payload.water?.[0] || 0;
+          const zone1Water2 = payload.water?.[1] || 0;
+          const zone2Water3 = payload.water?.[2] || 0;
+          const zone2Water4 = payload.water?.[3] || 0;
+          const zone1Detected = (zone1Water1 > waterThreshold) || (zone1Water2 > waterThreshold);
+          const zone2Detected = (zone2Water3 > waterThreshold) || (zone2Water4 > waterThreshold);
+
+          const sensorReading = {
+            device_id: deviceId,
+            user_id: null,
+            water_1: zone1Detected ? 1 : 0,
+            water_2: zone1Detected ? 1 : 0,
+            water_3: zone2Detected ? 1 : 0,
+            water_4: zone2Detected ? 1 : 0,
+            gas_detected: payload.gas !== undefined ? Boolean(payload.gas) : null,
+            temp_1: temp1,
+            temp_2: temp2,
+            movement: movementValue,
+            power_status: payload.power || null,
+            received_at: receivedAt,
+          };
+
+          const { error: insertError } = await supabaseAdmin
+            .from('sensor_readings')
+            .insert(sensorReading);
+
+          if (insertError) {
+            console.error('❌ Error storing sensor reading for unpaired device:', insertError.message);
+          } else {
+            console.log(`✅ Stored sensor reading for unpaired device ${deviceId} (user: null)`);
+          }
+        } catch (err) {
+          console.error('❌ Error storing sensor reading for unpaired device:', err.message || err);
+        }
+      } else {
+        console.error(`❌ MQTT: Device ${deviceId} not found in database`);
+        console.error(`   💡 To fix this, pair the device using: POST /api/telemetry/device/pair`);
+        console.error(`   📋 Device ID: ${deviceId}`);
+        console.error(`   ⚠️  Data from this device will be ignored until it is paired.`);
+      }
+
       return;
     }
 
@@ -322,7 +379,7 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
       console.log(`   💧 Zone 2: Water detected`);
     }
 
-    // Auto-associate device with first two sockets for this user
+    // Auto-associate device with all sockets for this user
     try {
       // Get the device UUID (id) from devices table
       const { data: device, error: deviceLookupError } = await supabaseAdmin
@@ -337,18 +394,17 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
       } else if (device) {
         const deviceUuid = device.id;
 
-        // Get the first two sockets for this user (ordered by creation date, oldest first)
+        // Get all sockets for this user (ordered by creation date, oldest first)
         const { data: sockets, error: socketsError } = await supabaseAdmin
           .from('sockets')
           .select('id')
           .eq('user_id', userId)
-          .order('created_at', { ascending: true })
-          .limit(2);
+          .order('created_at', { ascending: true });
 
         if (socketsError) {
           console.error(`❌ Error fetching user sockets:`, socketsError.message);
         } else if (sockets && sockets.length > 0) {
-          // For each of the first two sockets, ensure device association exists
+          // For each socket, ensure device association exists
           for (const socket of sockets) {
             // Check if association already exists
             const { data: existingAssociation, error: checkError } = await supabaseAdmin
@@ -377,6 +433,8 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
               } else {
                 console.log(`✅ Auto-associated device ${deviceId} with socket ${socket.id}`);
               }
+            } else {
+              console.log(`ℹ️ Association already exists: device ${deviceId} ↔ socket ${socket.id}`);
             }
           }
         }

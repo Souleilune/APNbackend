@@ -168,6 +168,23 @@ router.post('/device/pair', authenticateToken, async (req, res) => {
       throw createError;
     }
 
+    // Backfill existing sensor_readings for this device (previously unassigned)
+    try {
+      const { error: backfillError } = await supabaseAdmin
+        .from('sensor_readings')
+        .update({ user_id: req.user.id })
+        .eq('device_id', deviceId)
+        .is('user_id', null);
+
+      if (backfillError) {
+        console.error('❌ Error backfilling sensor_readings for paired device:', backfillError.message);
+      } else {
+        console.log(`🔁 Backfilled sensor_readings for device ${deviceId} to user ${req.user.id}`);
+      }
+    } catch (backfillErr) {
+      console.error('❌ Unexpected error during sensor_readings backfill:', backfillErr.message || backfillErr);
+    }
+
     res.status(201).json({
       message: 'Device paired successfully',
       device: {
@@ -237,8 +254,9 @@ router.post('/devices/discover', async (req, res) => {
     console.log('🔍 Device discovery request received');
 
     // Get all devices that have recent sensor readings but are not paired
-    // Find devices with sensor_readings in the last 5 minutes
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    // Find devices with sensor_readings in the last N minutes (configurable)
+    const discoveryWindowMinutes = parseInt(process.env.DISCOVERY_WINDOW_MINUTES || '15', 10);
+    const fiveMinutesAgo = new Date(Date.now() - discoveryWindowMinutes * 60 * 1000).toISOString();
 
     // Get all sensor_readings from the last 5 minutes
     const { data: recentReadings, error: readingsError } = await supabaseAdmin
@@ -292,6 +310,45 @@ router.post('/devices/discover', async (req, res) => {
         lastSeen: latestReading?.received_at || new Date().toISOString(),
         name: `ESP32-${deviceId.slice(-4)}`
       });
+    }
+
+    // Optional: force-inject a specific device ID into discovery results for onboarding/testing.
+    // Configure via environment variable FORCE_DISCOVER_DEVICE_ID (comma-separated allowed).
+    // This will only inject devices that are not currently paired to a user.
+    try {
+      const forceIds = (process.env.FORCE_DISCOVER_DEVICE_ID || '').split(',').map(s => s.trim()).filter(Boolean);
+      for (const fid of forceIds) {
+        if (!fid) continue;
+
+        // Skip if already present in unpairedDevices
+        if (unpairedDevices.find(d => d.deviceId === fid)) continue;
+
+        // Check devices table to ensure it's not paired
+        const { data: found, error: foundErr } = await supabaseAdmin
+          .from('devices')
+          .select('user_id')
+          .eq('device_id', fid)
+          .maybeSingle();
+
+        const isPaired = found && found.user_id !== null;
+        if (foundErr) {
+          console.error('❌ Error checking forced discover device:', foundErr.message || foundErr);
+        }
+
+        // Only inject if not paired
+        if (!isPaired) {
+          unpairedDevices.push({
+            deviceId: fid,
+            lastSeen: new Date().toISOString(),
+            name: `ESP32-${fid.slice(-4)}`
+          });
+          console.log(`🔍 Forced discovery: injecting device ${fid} into results`);
+        } else {
+          console.log(`🔒 Forced discovery: device ${fid} is already paired; skipping injection`);
+        }
+      }
+    } catch (err) {
+      console.error('❌ Error during forced discovery injection:', err.message || err);
     }
 
     console.log(`✅ Found ${unpairedDevices.length} unpaired active device(s)`);
