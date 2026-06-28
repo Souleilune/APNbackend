@@ -308,13 +308,19 @@ class MQTTService extends EventEmitter {
         const mv = /"movement"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
         if (mv) out.gyro = { movement: Number(mv[1]) };
 
-        // power raw v1_raw/v2_raw/current values
+        // power voltage/current values
+        const voltage1 = /"voltage1"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        if (voltage1) out.power = out.power || {}, out.power.voltage1 = Number(voltage1[1]);
+        const voltage2 = /"voltage2"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        if (voltage2) out.power = out.power || {}, out.power.voltage2 = Number(voltage2[1]);
         const v1 = /"v1_raw"\s*:\s*(\d+)/.exec(str);
         if (v1) out.power = out.power || {}, out.power.v1_raw = Number(v1[1]);
         const v2 = /"v2_raw"\s*:\s*(\d+)/.exec(str);
         if (v2) out.power = out.power || {}, out.power.v2_raw = Number(v2[1]);
         const cur1 = /"current1"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
         if (cur1) out.power = out.power || {}, out.power.current1 = Number(cur1[1]);
+        const cur2 = /"current2"\s*:\s*([-+]?[0-9]*\.?[0-9]+)/.exec(str);
+        if (cur2) out.power = out.power || {}, out.power.current2 = Number(cur2[1]);
 
         return out;
       } catch (err) {
@@ -374,11 +380,19 @@ class MQTTService extends EventEmitter {
     if (payload.status === 'ALERT_CLEARED') {
       return 'alert_cleared';
     }
-    if (payload.power) {
-      return 'power_status';
-    }
     if (payload.water || payload.gas !== undefined || payload.temperature || payload.gyro) {
       return 'sensor_reading';
+    }
+    if (
+      payload.power ||
+      payload.power_status ||
+      payload.voltage !== undefined ||
+      payload.voltage1 !== undefined ||
+      payload.voltage2 !== undefined ||
+      payload.current1 !== undefined ||
+      payload.current2 !== undefined
+    ) {
+      return 'power_status';
     }
     // Legacy medication payload support
     if (payload.medicine_name || payload.schedule_id) {
@@ -434,4 +448,3 @@ class MQTTService extends EventEmitter {
 // Export singleton instance
 const mqttService = new MQTTService();
 module.exports = mqttService;
-

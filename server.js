@@ -15,6 +15,41 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
+function normalizePowerPayload(payload = {}) {
+  const power = payload.power ?? payload.power_status ?? payload.status ?? null;
+  const topLevelPower = {
+    voltage1: payload.voltage1,
+    voltage2: payload.voltage2,
+    voltage: payload.voltage,
+    current1: payload.current1,
+    current2: payload.current2,
+    current: payload.current,
+    v1_raw: payload.v1_raw ?? payload.voltage1_raw,
+    v2_raw: payload.v2_raw ?? payload.voltage2_raw,
+  };
+
+  const hasTopLevelPower = Object.values(topLevelPower).some(value => value !== undefined && value !== null);
+  const powerValue = power && typeof power === 'object'
+    ? { ...power }
+    : power;
+
+  if (hasTopLevelPower) {
+    const normalized = typeof powerValue === 'object' && powerValue !== null ? powerValue : {};
+    Object.entries(topLevelPower).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        normalized[key] = value;
+      }
+    });
+    return JSON.stringify(normalized);
+  }
+
+  if (powerValue && typeof powerValue === 'object') {
+    return JSON.stringify(powerValue);
+  }
+
+  return powerValue !== null && powerValue !== undefined ? String(powerValue) : null;
+}
+
 // Initialize Supabase Admin client for MQTT message processing
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -143,7 +178,7 @@ async function handleTelemetry(data) {
             temp_1: temp1,
             temp_2: temp2,
             movement: movementValue,
-            power_status: payload.power || null,
+            power_status: normalizePowerPayload(payload),
             received_at: receivedAt,
           };
 
@@ -358,7 +393,7 @@ async function handleSensorReading(deviceId, userId, payload, receivedAt) {
       temp_1: temp1,
       temp_2: temp2,
       movement: movementValue,
-      power_status: payload.power || null,
+      power_status: normalizePowerPayload(payload),
       received_at: receivedAt,
     };
 
@@ -521,7 +556,7 @@ async function handlePowerStatus(deviceId, userId, payload, receivedAt) {
       temp_1: null,
       temp_2: null,
       movement: null,
-      power_status: payload.power || payload.status || null,
+      power_status: normalizePowerPayload(payload),
       received_at: receivedAt,
     };
 

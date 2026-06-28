@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
     movement DECIMAL(5,2),
     
     -- Power status
-    power_status VARCHAR(20), -- 'MAIN' or 'BACKUP_UPS'
+    power_status TEXT, -- JSON power telemetry or legacy status text
     
     -- Metadata
     received_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
